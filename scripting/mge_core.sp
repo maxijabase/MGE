@@ -26,7 +26,7 @@ enum GameplayType
 
 enum ArenaStatus
 {
-  Arena_Fight,
+  Arena_Fight, 
   Arena_Idle
 }
 
@@ -89,7 +89,7 @@ public Plugin myinfo =
 public void OnPluginStart()
 {
   LoadSpawnPoints();
-  ServerCommand("sm plugins load mge");
+  ServerCommand("sm plugins unload mge");
   RegConsoleCmd("add2", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
 }
 
@@ -253,18 +253,34 @@ void AddToQueue(int client, int arenaid)
   Arena arena;
   g_Arenas.GetArray(arenaid, arena);
   
-  if (arena.Status == Arena_Idle)
+  switch (arena.Status)
   {
-    arena.Players.Push(GetClientUserId(client));
+    case Arena_Idle:
+    {
+      arena.Players.Push(GetClientUserId(client));
+      TF2_ChangeClientTeam(client, TFTeam_Red);
+      ResetPlayer(client, arenaid);
+    }
+    case Arena_Fight:
+    {
+      arena.PlayerQueue.Push(GetClientUserId(client));
+    }
   }
   
   Debug("%N picked %s", client, arena.Name);
-  ResetPlayer(client, arenaid);
 }
 
-void RemoveFromQueue()
+void RemoveFromQueue(int client, int arenaid)
 {
+  // Get arena
+  Arena arena;
+  g_Arenas.GetArray(arenaid, arena);
   
+  // Remove player from arena's player list
+  arena.Players.Erase(arena.Players.FindValue(GetClientUserId(client)));
+  
+  // Send player to spectator
+  TF2_ChangeClientTeam(client, TFTeam_Spectator);
 }
 
 void ResetPlayer(int client, int arenaid)
@@ -274,10 +290,30 @@ void ResetPlayer(int client, int arenaid)
   g_Arenas.GetArray(arenaid, arena);
   
   // Pick a random spawn from that arena,
-  SpawnPoint coords; 
+  SpawnPoint coords;
   arena.SpawnPoints.GetArray(GetRandomInt(0, arena.SpawnPoints.Length), coords);
   
+  // TODO: this fucking sucks
+  float pointOrigin[3];
+  pointOrigin[0] = coords.OriginX;
+  pointOrigin[1] = coords.OriginY;
+  pointOrigin[2] = coords.OriginZ;
   
+  float pointAngles[3];
+  pointAngles[0] = coords.AngleX;
+  pointAngles[1] = coords.AngleY;
+  pointAngles[2] = coords.AngleZ;
+  
+  float pointVelocity[3] = { 0.0, 0.0, 0.0 };
+  
+  // Respawn the player
+  TF2_RespawnPlayer(client);
+  
+  // Teleport him to the designed spawn point
+  TeleportEntity(client, pointOrigin, pointAngles, pointVelocity);
+  
+  // Emit respawn sound
+  EmitAmbientSound("items/spawn_item.wav", pointOrigin, _delay:1.0);
 }
 
 SpawnPoint GetArenaSpawnPoints(const char[] coords)
@@ -361,12 +397,12 @@ ArrayList GetArenaAllowedClasses(const char[] classes)
   }
   
   return result;
-} 
+}
 
-void Debug(const char[] msg, any ...)
+void Debug(const char[] msg, any...)
 {
   char out[1024];
   VFormat(out, sizeof(out), msg, 2);
   PrintToChatAll(out);
   PrintToServer(out);
-}
+} 
