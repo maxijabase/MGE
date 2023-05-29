@@ -47,6 +47,14 @@ enum struct Player
   int UserID;
   int ELO;
   int Score;
+  int ArenaId;
+  float Handicap;
+  
+  void Fill(int client)
+  {
+    GetClientName(client, this.Name, sizeof(this.Name));
+    this.UserID = GetClientUserId(client);
+  }
 }
 
 enum struct Arena
@@ -80,10 +88,19 @@ enum struct Arena
   bool Turris;
   bool KOTH;
   GameplayType Gameplay;
+  
+  SpawnPoint GetRandomSpawn()
+  {
+    SpawnPoint coords;
+    this.SpawnPoints.GetArray(GetRandomInt(0, this.SpawnPoints.Length - 1), coords);
+    return coords;
+  }
 }
 
 ArrayList g_Arenas;
+ArrayList g_Players;
 char g_Map[64];
+bool g_Late;
 
 public Plugin myinfo = 
 {
@@ -94,11 +111,38 @@ public Plugin myinfo =
   url = "github.com/maxijabase"
 };
 
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+  EngineVersion version = GetEngineVersion();
+  if (version != Engine_TF2)
+  {
+    SetFailState("This plugin was made for use with Team Fortress 2 only.");
+  }
+  
+  g_Late = late;
+  
+  return APLRes_Success;
+} 
+
 public void OnPluginStart()
 {
   LoadSpawnPoints();
   RegConsoleCmd("add", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
   RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
+  
+  g_Players = new ArrayList(sizeof(Player));
+  
+  if (g_Late)
+  {
+    for (int i = 1; i <= MaxClients; i++)
+    {
+      if (IsValidClient(i))
+      {
+        ForcePlayerSuicide(i);
+        OnClientPostAdminCheck(i);
+      }
+    }
+  }
 }
 
 public void OnMapStart()
@@ -114,7 +158,13 @@ public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcas
 
 public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
-  TF2_RegeneratePlayer(GetClientOfUserId(event.GetInt("userid")));
+  int client = GetClientOfUserId(event.GetInt("userid"));
+  Player player;
+  player = GetPlayer(client);
+  TF2_RegeneratePlayer(client);
+  DataPack pack = new DataPack();
+  pack.WriteCellArray(player, sizeof(player));
+  CreateTimer(0.1, Timer_ResetPlayer, pack);
 }
 
 void LoadSpawnPoints()
@@ -239,6 +289,10 @@ void LoadSpawnPoints()
 
 public void OnClientPostAdminCheck(int client)
 {
+  Player player;
+  player.Fill(client);
+  g_Players.PushArray(player);
+  
   TF2_ChangeClientTeam(client, TFTeam_Spectator);
 }
 
@@ -308,12 +362,21 @@ void AddToQueue(int client, int arenaid)
   {
     case Arena_Idle:
     {
-      arena.Players.Push(GetClientUserId(client));
+      // Get player
+      Player player;
+      player = GetPlayer(client);
+      
+      // Set arena ID
+      player.ArenaId = arenaid;
+      Debug("Player %N arena id set to %d", GetClientOfUserId(player.UserID), player.ArenaId);
+      
+      // Push player to arena
+      arena.Players.PushArray(player);
+      
+      // Reset player
       DataPack pack = new DataPack();
-      pack.WriteCell(GetClientUserId(client));
-      pack.WriteCell(arenaid);
-      Debug("Frame in: %N AddToQueue", client);
-      RequestFrame(Timer_ResetPlayer, pack);
+      pack.WriteCellArray(player, sizeof(player));
+      CreateTimer(0.1, Timer_ResetPlayer, pack);
     }
     case Arena_Fight:
     {
@@ -328,51 +391,48 @@ void RemoveFromQueue(int client)
   TF2_ChangeClientTeam(client, TFTeam_Spectator);
 }
 
-void Timer_ResetPlayer(DataPack pack)
+Action Timer_ResetPlayer(Handle timer, DataPack pack)
 {
   pack.Reset();
-  int userid = pack.ReadCell();
-  int arenaid = pack.ReadCell();
+  Player player; 
+  pack.ReadCellArray(player, sizeof(player));
   delete pack;
-  Debug("Frame out: %N AddToQueue", GetClientOfUserId(userid));
   
-  Debug("Frame in: reset player %N", GetClientOfUserId(userid));
-  ResetPlayer(GetClientOfUserId(userid), arenaid);
+  ResetPlayer(player);
 }
 
-void ResetPlayer(int client, int arenaid)
+void ResetPlayer(Player player)
 {
+  int client = GetClientOfUserId(player.UserID);
+  
   // Respawn the player
   TF2_ChangeClientTeam(client, TFTeam_Red);
   TF2_SetPlayerClass(client, TFClass_Scout);
   TF2_RespawnPlayer(client);
   
-  Debug("Frame out: reset player %N", client);
-  
   // Create teleport timer
   DataPack pack = new DataPack();
-  pack.WriteCell(GetClientUserId(client));
-  pack.WriteCell(arenaid);
-  Debug("Frame in: teleport %N", client);
-  RequestFrame(Timer_TeleportPlayer, pack);
+  pack.WriteCellArray(player, sizeof(player));
+  
+  CreateTimer(0.1, Timer_TeleportPlayer, pack);
 }
 
-void Timer_TeleportPlayer(DataPack pack)
+Action Timer_TeleportPlayer(Handle timer, DataPack pack)
 {
   pack.Reset();
-  int client = GetClientOfUserId(pack.ReadCell());
-  int arenaid = pack.ReadCell();
+  Player player; 
+  pack.ReadCellArray(player, sizeof(player));
   delete pack;
   
-  Debug("Frame out: teleport %N", client);
+  int client = GetClientOfUserId(player.UserID);
   
   // Get arena
   Arena arena;
-  g_Arenas.GetArray(arenaid, arena);
+  g_Arenas.GetArray(player.ArenaId, arena);
   
   // Pick a random spawn from that arena,
   SpawnPoint coords;
-  arena.SpawnPoints.GetArray(GetRandomInt(0, arena.SpawnPoints.Length - 1), coords);
+  coords = arena.GetRandomSpawn();
   
   // TODO: this fucking sucks
   float pointOrigin[3];
@@ -391,7 +451,7 @@ void Timer_TeleportPlayer(DataPack pack)
   TeleportEntity(client, pointOrigin, pointAngles, pointVelocity);
   
   // Emit respawn sound
-  EmitAmbientSound("items/spawn_item.wav", pointOrigin, .delay = 1.0);
+  EmitAmbientSound("items/spawn_item.wav", pointOrigin);
 }
 SpawnPoint GetArenaSpawnPoints(const char[] coords)
 {
@@ -476,6 +536,20 @@ ArrayList GetArenaAllowedClasses(const char[] classes)
   return result;
 }
 
+Player GetPlayer(int userid)
+{
+  Player player;
+  for (int i = 0; i < g_Players.Length; i++)
+  {
+    g_Players.GetArray(i, player);
+    if (player.UserID == userid)
+    {
+      return player;
+    }
+  }
+  return player;
+}
+
 void Debug(const char[] msg, any...)
 {
   char out[1024];
@@ -483,3 +557,26 @@ void Debug(const char[] msg, any...)
   PrintToChatAll(out);
   PrintToServer(out);
 } 
+
+bool IsValidClient(int iClient, bool bIgnoreKickQueue = false)
+{
+  if 
+    (
+    // "client" is 0 (console) or lower - nope!
+    0 >= iClient
+    // "client" is higher than MaxClients - nope!
+     || MaxClients < iClient
+    // "client" isnt in game aka their entity hasn't been created - nope!
+     || !IsClientInGame(iClient)
+    // "client" is in the kick queue - nope!
+     || (IsClientInKickQueue(iClient) && !bIgnoreKickQueue)
+    // "client" is sourcetv - nope!
+     || IsClientSourceTV(iClient)
+    // "client" is the replay bot - nope!
+     || IsClientReplay(iClient)
+    )
+  {
+    return false;
+  }
+  return true;
+}
