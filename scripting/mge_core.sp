@@ -41,6 +41,14 @@ enum struct SpawnPoint
   float AngleZ;
 }
 
+enum struct Player
+{
+  char Name[MAX_NAME_LENGTH];
+  int UserID;
+  int ELO;
+  int Score;
+}
+
 enum struct Arena
 {
   char Name[MAX_ARENA_NAME];
@@ -89,8 +97,24 @@ public Plugin myinfo =
 public void OnPluginStart()
 {
   LoadSpawnPoints();
-  ServerCommand("sm plugins unload mge");
-  RegConsoleCmd("add2", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
+  RegConsoleCmd("add", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
+  RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
+}
+
+public void OnMapStart()
+{
+  HookEvent("teamplay_round_start", Event_RoundStart, EventHookMode_Post);
+  HookEvent("player_death", Event_PlayerDeath, EventHookMode_Pre);
+}
+
+public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
+{
+  FindConVar("mp_waitingforplayers_cancel").SetInt(1);
+}
+
+public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+  TF2_RegeneratePlayer(GetClientOfUserId(event.GetInt("userid")));
 }
 
 void LoadSpawnPoints()
@@ -213,7 +237,29 @@ void LoadSpawnPoints()
   LogMessage("MGEMod Loaded with %d arenas.", g_Arenas.Length);
 }
 
+public void OnClientPostAdminCheck(int client)
+{
+  TF2_ChangeClientTeam(client, TFTeam_Spectator);
+}
+
 public Action CMD_AddMenu(int client, int args)
+{
+  char arg1[8];
+  GetCmdArg(1, arg1, sizeof(arg1));
+  
+  int arenaIndex = StringToInt(arg1);
+  
+  if (arenaIndex > 0 && arenaIndex <= g_Arenas.Length)
+  {
+    AddToQueue(client, arenaIndex - 1);
+    return Plugin_Handled;
+  }
+  
+  ShowAddMenu(client);
+  return Plugin_Handled;
+}
+
+void ShowAddMenu(int client)
 {
   Menu menu = new Menu(Menu_Main);
   menu.SetTitle("Select an arena...");
@@ -231,7 +277,6 @@ public Action CMD_AddMenu(int client, int args)
   }
   
   menu.Display(client, 20);
-  return Plugin_Handled;
 }
 
 public int Menu_Main(Menu menu, MenuAction action, int param1, int param2)
@@ -248,6 +293,12 @@ public int Menu_Main(Menu menu, MenuAction action, int param1, int param2)
   }
 }
 
+public Action CMD_Remove(int client, int args)
+{
+  RemoveFromQueue(client);
+  return Plugin_Handled;
+}
+
 void AddToQueue(int client, int arenaid)
 {
   Arena arena;
@@ -258,40 +309,70 @@ void AddToQueue(int client, int arenaid)
     case Arena_Idle:
     {
       arena.Players.Push(GetClientUserId(client));
-      TF2_ChangeClientTeam(client, TFTeam_Red);
-      ResetPlayer(client, arenaid);
+      DataPack pack = new DataPack();
+      pack.WriteCell(GetClientUserId(client));
+      pack.WriteCell(arenaid);
+      Debug("Frame in: %N AddToQueue", client);
+      RequestFrame(Timer_ResetPlayer, pack);
     }
     case Arena_Fight:
     {
       arena.PlayerQueue.Push(GetClientUserId(client));
     }
   }
-  
-  Debug("%N picked %s", client, arena.Name);
 }
 
-void RemoveFromQueue(int client, int arenaid)
+void RemoveFromQueue(int client)
 {
-  // Get arena
-  Arena arena;
-  g_Arenas.GetArray(arenaid, arena);
-  
-  // Remove player from arena's player list
-  arena.Players.Erase(arena.Players.FindValue(GetClientUserId(client)));
-  
   // Send player to spectator
   TF2_ChangeClientTeam(client, TFTeam_Spectator);
 }
 
+void Timer_ResetPlayer(DataPack pack)
+{
+  pack.Reset();
+  int userid = pack.ReadCell();
+  int arenaid = pack.ReadCell();
+  delete pack;
+  Debug("Frame out: %N AddToQueue", GetClientOfUserId(userid));
+  
+  Debug("Frame in: reset player %N", GetClientOfUserId(userid));
+  ResetPlayer(GetClientOfUserId(userid), arenaid);
+}
+
 void ResetPlayer(int client, int arenaid)
 {
+  // Respawn the player
+  TF2_ChangeClientTeam(client, TFTeam_Red);
+  TF2_SetPlayerClass(client, TFClass_Scout);
+  TF2_RespawnPlayer(client);
+  
+  Debug("Frame out: reset player %N", client);
+  
+  // Create teleport timer
+  DataPack pack = new DataPack();
+  pack.WriteCell(GetClientUserId(client));
+  pack.WriteCell(arenaid);
+  Debug("Frame in: teleport %N", client);
+  RequestFrame(Timer_TeleportPlayer, pack);
+}
+
+void Timer_TeleportPlayer(DataPack pack)
+{
+  pack.Reset();
+  int client = GetClientOfUserId(pack.ReadCell());
+  int arenaid = pack.ReadCell();
+  delete pack;
+  
+  Debug("Frame out: teleport %N", client);
+  
   // Get arena
   Arena arena;
   g_Arenas.GetArray(arenaid, arena);
   
   // Pick a random spawn from that arena,
   SpawnPoint coords;
-  arena.SpawnPoints.GetArray(GetRandomInt(0, arena.SpawnPoints.Length), coords);
+  arena.SpawnPoints.GetArray(GetRandomInt(0, arena.SpawnPoints.Length - 1), coords);
   
   // TODO: this fucking sucks
   float pointOrigin[3];
@@ -306,22 +387,18 @@ void ResetPlayer(int client, int arenaid)
   
   float pointVelocity[3] = { 0.0, 0.0, 0.0 };
   
-  // Respawn the player
-  TF2_RespawnPlayer(client);
-  
   // Teleport him to the designed spawn point
   TeleportEntity(client, pointOrigin, pointAngles, pointVelocity);
   
   // Emit respawn sound
-  EmitAmbientSound("items/spawn_item.wav", pointOrigin, _delay:1.0);
+  EmitAmbientSound("items/spawn_item.wav", pointOrigin, .delay = 1.0);
 }
-
 SpawnPoint GetArenaSpawnPoints(const char[] coords)
 {
   SpawnPoint point;
   point.Valid = true;
   char spawn[6][16];
-  int count = ExplodeString(coords, " ", spawn, sizeof(spawn[]), sizeof(spawn[][]));
+  int count = ExplodeString(coords, " ", spawn, sizeof(spawn), sizeof(spawn[]));
   
   point.OriginX = StringToFloat(spawn[0]);
   point.OriginY = StringToFloat(spawn[1]);
