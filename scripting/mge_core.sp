@@ -1,5 +1,6 @@
 #include <sourcemod>
 #include <tf2_stocks>
+#include <sdkhooks>
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -122,13 +123,16 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
   g_Late = late;
   
   return APLRes_Success;
-} 
+}
 
 public void OnPluginStart()
 {
+  ServerCommand("sm plugins unload mge_core");
   LoadSpawnPoints();
   RegConsoleCmd("add", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
   RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
+  RegConsoleCmd("debugplayers", CMD_DebugPlayers);
+  RegConsoleCmd("kill", CMD_Kill);
   
   g_Players = new ArrayList(sizeof(Player));
   
@@ -145,26 +149,95 @@ public void OnPluginStart()
   }
 }
 
+public Action CMD_Kill(int client, int args)
+{
+  SDKHooks_TakeDamage(client, 0, 0, 30.0);
+  return Plugin_Handled;
+}
+
+public Action CMD_DebugPlayers(int client, int args)
+{
+  for (int i = 0; i < g_Players.Length; i++)
+  {
+    Player player;
+    g_Players.GetArray(i, player);
+    Debug("=====TICK %2.f====", GetTickedTime());
+    Debug("Nº%d - Name: %s", i, player.Name);
+    Debug("Nº%d - UserID: %d", i, player.UserID);
+    Debug("Nº%d - ArenaID: %d", i, player.ArenaId);
+    Debug("==================");
+  }
+  return Plugin_Handled;
+}
+
 public void OnMapStart()
 {
-  HookEvent("teamplay_round_start", Event_RoundStart, EventHookMode_Post);
-  HookEvent("player_death", Event_PlayerDeath, EventHookMode_Pre);
+  HookEvent("teamplay_round_start", Event_OnRoundStart, EventHookMode_Post);
+  HookEvent("player_death", Event_OnPlayerDeath, EventHookMode_Pre);
+  HookEvent("player_spawn", Event_OnPlayerSpawn, EventHookMode_Post);
+  HookEvent("player_hurt", Event_OnPlayerHurt, EventHookMode_Pre);
+  HookEvent("player_team", Event_OnPlayerJoinTeam, EventHookMode_Pre);
+  HookEvent("teamplay_win_panel", Event_OnWinPanelDisplay, EventHookMode_Post);
+  
+  FindConVar("mp_autoteambalance").SetInt(1);
+  FindConVar("mp_teams_unbalance_limit").SetInt(32);
+  FindConVar("mp_tournament").SetInt(0);
 }
 
-public Action Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
+public Action Event_OnRoundStart(Event event, const char[] name, bool dontBroadcast)
 {
   FindConVar("mp_waitingforplayers_cancel").SetInt(1);
+  return Plugin_Continue;
 }
 
-public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
-  int client = GetClientOfUserId(event.GetInt("userid"));
+  int userid = event.GetInt("userid");
   Player player;
-  player = GetPlayer(client);
-  TF2_RegeneratePlayer(client);
+  player = GetPlayer(userid);
   DataPack pack = new DataPack();
   pack.WriteCellArray(player, sizeof(player));
   CreateTimer(0.1, Timer_ResetPlayer, pack);
+  
+  /*
+    - Skip death ringer deaths
+    - Increase killer score
+    - Calculate ELO if match is over
+    - Process next match if queue is not empty
+  */
+}
+
+public Action Event_OnPlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+  /*
+    - Set player HP (take HP ratio in account)
+    - Restore ammo count
+    - 
+  */
+}
+
+public Action Event_OnPlayerHurt(Event event, const char[] name, bool dontBroadcast)
+{
+  /*
+    - ENDIF calculations idk
+    - Expose to forwards for logging
+  */
+}
+
+public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBroadcast)
+{
+  /*
+    - If player joins spec, remove him from queue
+    - Prevent team switch altogether?
+    - ^ update: dont do this here! hook jointeam command for better UX
+  */
+}
+
+public Action Event_OnWinPanelDisplay(Event event, const char[] name, bool dontBroadcast)
+{
+  /*
+    - Disable stats so people leaving at the end of the map don't lose points.
+  */
 }
 
 void LoadSpawnPoints()
@@ -192,8 +265,8 @@ void LoadSpawnPoints()
     Arena arena;
     arena.AllowedClasses = new ArrayList(ByteCountToCells(32));
     arena.SpawnPoints = new ArrayList(sizeof(SpawnPoint));
-    arena.Players = new ArrayList(ByteCountToCells(32));
-    arena.PlayerQueue = new ArrayList(ByteCountToCells(32));
+    arena.Players = new ArrayList(sizeof(Player));
+    arena.PlayerQueue = new ArrayList(sizeof(Player));
     arena.Status = Arena_Idle;
     
     // Get section name to get arena name
@@ -293,6 +366,8 @@ public void OnClientPostAdminCheck(int client)
   player.Fill(client);
   g_Players.PushArray(player);
   
+  Debug("Player %s with userid %d was pushed.", player.Name, player.UserID);
+  
   TF2_ChangeClientTeam(client, TFTeam_Spectator);
 }
 
@@ -367,8 +442,9 @@ void AddToQueue(int client, int arenaid)
       player = GetPlayer(client);
       
       // Set arena ID
-      player.ArenaId = arenaid;
-      Debug("Player %N arena id set to %d", GetClientOfUserId(player.UserID), player.ArenaId);
+      // player.ArenaId = arenaid + 1;
+      g_Players.Set(0, arenaid + 1, Player::ArenaId);
+      Debug("[AddToQueue] Adding %s to arena %d (arenaid %d)", player.Name, player.ArenaId, arenaid);
       
       // Push player to arena
       arena.Players.PushArray(player);
@@ -394,9 +470,11 @@ void RemoveFromQueue(int client)
 Action Timer_ResetPlayer(Handle timer, DataPack pack)
 {
   pack.Reset();
-  Player player; 
+  Player player;
   pack.ReadCellArray(player, sizeof(player));
   delete pack;
+  
+  Debug("[Timer_ResetPlayer] Resetting player %s who died in arena %d", player.Name, player.ArenaId);
   
   ResetPlayer(player);
 }
@@ -420,7 +498,7 @@ void ResetPlayer(Player player)
 Action Timer_TeleportPlayer(Handle timer, DataPack pack)
 {
   pack.Reset();
-  Player player; 
+  Player player;
   pack.ReadCellArray(player, sizeof(player));
   delete pack;
   
@@ -428,7 +506,10 @@ Action Timer_TeleportPlayer(Handle timer, DataPack pack)
   
   // Get arena
   Arena arena;
-  g_Arenas.GetArray(player.ArenaId, arena);
+  
+  Debug("[Timer_TeleportPlayer] trying to access arena index %d", player.ArenaId - 1);
+  
+  g_Arenas.GetArray(player.ArenaId - 1, arena);
   
   // Pick a random spawn from that arena,
   SpawnPoint coords;
@@ -539,14 +620,24 @@ ArrayList GetArenaAllowedClasses(const char[] classes)
 Player GetPlayer(int userid)
 {
   Player player;
+  
+  Debug("[GetPlayer] total player count is %d", g_Players.Length);
   for (int i = 0; i < g_Players.Length; i++)
   {
     g_Players.GetArray(i, player);
+    Debug("[GetPlayer] searching through player %d: %s...", i, player.Name);
     if (player.UserID == userid)
     {
+      Debug("[GetPlayer] found player %s with arenaid %d", player.Name, player.ArenaId);
       return player;
     }
   }
+  
+  if (player.UserID == 0)
+  {
+    Debug("[GetPlayer] userid was 0!!!");
+  }
+  
   return player;
 }
 
@@ -556,7 +647,7 @@ void Debug(const char[] msg, any...)
   VFormat(out, sizeof(out), msg, 2);
   PrintToChatAll(out);
   PrintToServer(out);
-} 
+}
 
 bool IsValidClient(int iClient, bool bIgnoreKickQueue = false)
 {
@@ -579,4 +670,4 @@ bool IsValidClient(int iClient, bool bIgnoreKickQueue = false)
     return false;
   }
   return true;
-}
+} 
