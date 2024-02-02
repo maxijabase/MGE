@@ -127,8 +127,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnPluginStart()
 {
-  ServerCommand("sm plugins unload mge_core");
+  //ServerCommand("sm plugins unload mge_core");
   LoadSpawnPoints();
+  RegConsoleCmd("jointeam", CMD_JoinTeam);
   RegConsoleCmd("add", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
   RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
   RegConsoleCmd("debugplayers", CMD_DebugPlayers);
@@ -151,20 +152,26 @@ public void OnPluginStart()
 
 public Action CMD_Kill(int client, int args)
 {
-  SDKHooks_TakeDamage(client, 0, 0, 30.0);
+  SDKHooks_TakeDamage(client, 0, 0, 300.0);
   return Plugin_Handled;
 }
 
 public Action CMD_DebugPlayers(int client, int args)
 {
+  
+  if (g_Players.Length == 0) {
+    Debug("No players.");
+    return Plugin_Handled;
+  }
+  
   for (int i = 0; i < g_Players.Length; i++)
   {
     Player player;
     g_Players.GetArray(i, player);
     Debug("=====TICK %2.f====", GetTickedTime());
-    Debug("Nº%d - Name: %s", i, player.Name);
-    Debug("Nº%d - UserID: %d", i, player.UserID);
-    Debug("Nº%d - ArenaID: %d", i, player.ArenaId);
+    Debug("%d - Name: %s", i, player.Name);
+    Debug("%d - UserID: %d", i, player.UserID);
+    Debug("%d - ArenaID: %d", i, player.ArenaId);
     Debug("==================");
   }
   return Plugin_Handled;
@@ -231,6 +238,9 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
     - Prevent team switch altogether?
     - ^ update: dont do this here! hook jointeam command for better UX
   */
+  
+  
+  
 }
 
 public Action Event_OnWinPanelDisplay(Event event, const char[] name, bool dontBroadcast)
@@ -371,6 +381,31 @@ public void OnClientPostAdminCheck(int client)
   TF2_ChangeClientTeam(client, TFTeam_Spectator);
 }
 
+public void OnClientDisconnect(int client)
+{
+  int userId = GetClientUserId(client);
+  
+  // Iterate through the global players ArrayList
+  for (int i = 0; i < g_Players.Length; i++)
+  {
+    Player player;
+    g_Players.GetArray(i, player);
+    
+    // Check if the User ID matches
+    if (player.UserID == userId)
+    {
+      // Remove the player from the array
+      g_Players.Erase(i);
+      
+      Debug("Player %s with userid %d was removed.", player.Name, player.UserID);
+      
+      // You may want to perform additional cleanup or handle other logic here
+      
+      break; // Break the loop after removing the player
+    }
+  }
+}
+
 public Action CMD_AddMenu(int client, int args)
 {
   char arg1[8];
@@ -426,6 +461,23 @@ public Action CMD_Remove(int client, int args)
 {
   RemoveFromQueue(client);
   return Plugin_Handled;
+}
+
+public Action CMD_JoinTeam(int client, int args)
+{
+  char team[16];
+  GetCmdArg(1, team, sizeof(team));
+  
+  if (!strcmp(team, "spectate"))
+  {
+    RemoveFromQueue(client);
+    Debug("Removing from queue...");
+    return Plugin_Continue;
+  }
+  else {
+    Debug("Can't switch teams!");
+    return Plugin_Stop;
+  }
 }
 
 void AddToQueue(int client, int arenaid)
@@ -534,6 +586,7 @@ Action Timer_TeleportPlayer(Handle timer, DataPack pack)
   // Emit respawn sound
   EmitAmbientSound("items/spawn_item.wav", pointOrigin);
 }
+
 SpawnPoint GetArenaSpawnPoints(const char[] coords)
 {
   SpawnPoint point;
