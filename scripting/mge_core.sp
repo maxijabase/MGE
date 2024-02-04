@@ -1,3 +1,5 @@
+#define DEBUG 1
+
 #include <sourcemod>
 #include <tf2_stocks>
 #include <sdkhooks>
@@ -45,6 +47,7 @@ enum struct SpawnPoint
 enum struct Player
 {
   char Name[MAX_NAME_LENGTH];
+  int Index;
   int UserID;
   int ELO;
   int Score;
@@ -56,11 +59,19 @@ enum struct Player
     GetClientName(client, this.Name, sizeof(this.Name));
     this.UserID = GetClientUserId(client);
   }
+  
+  Arena GetArena()
+  {
+    Arena arena;
+    arena = GetArena(this.ArenaId);
+    return arena;
+  }
 }
 
 enum struct Arena
 {
   char Name[MAX_ARENA_NAME];
+  int Id;
   ArrayList Players;
   ArrayList PlayerQueue;
   ArrayList SpawnPoints;
@@ -96,6 +107,24 @@ enum struct Arena
     this.SpawnPoints.GetArray(GetRandomInt(0, this.SpawnPoints.Length - 1), coords);
     return coords;
   }
+  
+  void AddPlayer(Player player)
+  {
+    this.Players.PushArray(player);
+  }
+  
+  void RemovePlayer(Player player)
+  {
+    Player arenaPlayer;
+    for (int i = 0; i < this.Players.Length; i++)
+    {
+      this.Players.GetArray(i, arenaPlayer);
+      if (arenaPlayer.UserID == player.UserID)
+      {
+        this.Players.Erase(i);
+      }
+    }
+  }
 }
 
 ArrayList g_Arenas;
@@ -130,9 +159,11 @@ public void OnPluginStart()
   //ServerCommand("sm plugins unload mge_core");
   LoadSpawnPoints();
   RegConsoleCmd("jointeam", CMD_JoinTeam);
+  RegConsoleCmd("autoteam", CMD_AutoTeam);
   RegConsoleCmd("add", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
   RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
   RegConsoleCmd("debugplayers", CMD_DebugPlayers);
+  RegConsoleCmd("debugarenas", CMD_DebugArenas);
   RegConsoleCmd("kill", CMD_Kill);
   
   g_Players = new ArrayList(sizeof(Player));
@@ -173,6 +204,32 @@ public Action CMD_DebugPlayers(int client, int args)
     Debug("%d - UserID: %d", i, player.UserID);
     Debug("%d - ArenaID: %d", i, player.ArenaId);
     Debug("==================");
+  }
+  return Plugin_Handled;
+}
+
+public Action CMD_DebugArenas(int client, int args)
+{
+  for (int i = 0; i < g_Arenas.Length; i++)
+  {
+    Arena arena;
+    g_Arenas.GetArray(i, arena);
+    Debug("=====TICK %2.f====", GetTickedTime());
+    Debug("%d - Arena: %s (%d)", i, arena.Name, arena.Id);
+    Debug("%d - Status: %d", i, arena.Status);
+    Debug("Players:");
+    if (arena.Players.Length == 0)
+    {
+      Debug("No players on arena %d", i);
+    }
+    for (int j = 0; j < arena.Players.Length; j++)
+    {
+      Player player;
+      g_Players.GetArray(j, player);
+      Debug("   - Player %d - Name: %s", j, player.Name);
+      Debug("   - Player %d - UserID: %d", j, player.UserID);
+      Debug("   - Player %d - ArenaID: %d", j, player.ArenaId);
+    }
   }
   return Plugin_Handled;
 }
@@ -269,10 +326,13 @@ void LoadSpawnPoints()
   
   kv.GotoFirstSubKey();
   
+  int arenaId = 1;
+  
   do
   {
     // Create arena
     Arena arena;
+    arena.Id = arenaId++;
     arena.AllowedClasses = new ArrayList(ByteCountToCells(32));
     arena.SpawnPoints = new ArrayList(sizeof(SpawnPoint));
     arena.Players = new ArrayList(sizeof(Player));
@@ -383,27 +443,10 @@ public void OnClientPostAdminCheck(int client)
 
 public void OnClientDisconnect(int client)
 {
-  int userId = GetClientUserId(client);
-  
-  // Iterate through the global players ArrayList
-  for (int i = 0; i < g_Players.Length; i++)
-  {
-    Player player;
-    g_Players.GetArray(i, player);
-    
-    // Check if the User ID matches
-    if (player.UserID == userId)
-    {
-      // Remove the player from the array
-      g_Players.Erase(i);
-      
-      Debug("Player %s with userid %d was removed.", player.Name, player.UserID);
-      
-      // You may want to perform additional cleanup or handle other logic here
-      
-      break; // Break the loop after removing the player
-    }
-  }
+  int userid = GetClientUserId(client);
+  Player player;
+  player = GetPlayer(userid);
+  g_Players.Erase(player.Index);
 }
 
 public Action CMD_AddMenu(int client, int args)
@@ -465,6 +508,7 @@ public Action CMD_Remove(int client, int args)
 
 public Action CMD_JoinTeam(int client, int args)
 {
+  // We will block manual team joining, but show add menu if they're on spec
   char team[16];
   GetCmdArg(1, team, sizeof(team));
   
@@ -476,30 +520,56 @@ public Action CMD_JoinTeam(int client, int args)
   }
   else {
     Debug("Can't switch teams!");
+    if (TF2_GetClientTeam(client) == TFTeam_Spectator)
+    {
+      ShowAddMenu(client);
+    }
     return Plugin_Stop;
   }
 }
 
+public Action CMD_AutoTeam(int client, int args)
+{
+  // We will block autoteam command usage, and show add menu instead
+  Debug("Preventing autoteam...");
+  if (TF2_GetClientTeam(client) == TFTeam_Spectator)
+  {
+    ShowAddMenu(client);
+  }
+  return Plugin_Stop;
+}
+
 void AddToQueue(int client, int arenaid)
 {
+  
+  // Here we have to search for the arena the player was, prior to joining this new arena
+  // if getplayer.arena != 0; remove that player from that arena's player list
+  
+  // Get player
+  Player player;
+  player = GetPlayer(GetClientUserId(client));
+  
+  if (player.ArenaId != 0)
+  {
+    Arena playerArena;
+    playerArena = player.GetArena();
+    playerArena.RemovePlayer(player);
+  }
+  
   Arena arena;
-  g_Arenas.GetArray(arenaid, arena);
+  arena = GetArena(arenaid);
   
   switch (arena.Status)
   {
     case Arena_Idle:
     {
-      // Get player
-      Player player;
-      player = GetPlayer(client);
-      
       // Set arena ID
       // player.ArenaId = arenaid + 1;
-      g_Players.Set(0, arenaid + 1, Player::ArenaId);
+      g_Players.Set(0, arenaid, Player::ArenaId);
       Debug("[AddToQueue] Adding %s to arena %d (arenaid %d)", player.Name, player.ArenaId, arenaid);
       
       // Push player to arena
-      arena.Players.PushArray(player);
+      arena.AddPlayer(player);
       
       // Reset player
       DataPack pack = new DataPack();
@@ -517,6 +587,14 @@ void RemoveFromQueue(int client)
 {
   // Send player to spectator
   TF2_ChangeClientTeam(client, TFTeam_Spectator);
+  
+  // Delete his arena ID
+  Player player;
+  player = GetPlayer(GetClientUserId(client));
+  
+  g_Players.Set(player.Index, 0, Player::ArenaId);
+  
+  // Delete player from arena player list
 }
 
 Action Timer_ResetPlayer(Handle timer, DataPack pack)
@@ -559,9 +637,9 @@ Action Timer_TeleportPlayer(Handle timer, DataPack pack)
   // Get arena
   Arena arena;
   
-  Debug("[Timer_TeleportPlayer] trying to access arena index %d", player.ArenaId - 1);
+  Debug("[Timer_TeleportPlayer] trying to access arena index %d", player.ArenaId);
   
-  g_Arenas.GetArray(player.ArenaId - 1, arena);
+  g_Arenas.GetArray(player.ArenaId, arena);
   
   // Pick a random spawn from that arena,
   SpawnPoint coords;
@@ -670,6 +748,7 @@ ArrayList GetArenaAllowedClasses(const char[] classes)
   return result;
 }
 
+// Use this to get a player from the global players array based on userid
 Player GetPlayer(int userid)
 {
   Player player;
@@ -682,6 +761,7 @@ Player GetPlayer(int userid)
     if (player.UserID == userid)
     {
       Debug("[GetPlayer] found player %s with arenaid %d", player.Name, player.ArenaId);
+      player.Index = i;
       return player;
     }
   }
@@ -694,12 +774,27 @@ Player GetPlayer(int userid)
   return player;
 }
 
+Arena GetArena(int arenaId)
+{
+  Arena arena;
+  for (int i = 0; i < g_Arenas.Length; i++)
+  {
+    g_Arenas.GetArray(i, arena);
+    if (arena.Id == arenaId)
+    {
+      return arena;
+    }
+  }
+}
+
 void Debug(const char[] msg, any...)
 {
+  #if DEBUG == 1
   char out[1024];
   VFormat(out, sizeof(out), msg, 2);
   PrintToChatAll(out);
   PrintToServer(out);
+  #endif
 }
 
 bool IsValidClient(int iClient, bool bIgnoreKickQueue = false)
