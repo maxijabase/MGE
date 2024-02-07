@@ -66,6 +66,16 @@ enum struct Player
     arena = GetArena(this.ArenaId);
     return arena;
   }
+  
+  void CloseAddMenu()
+  {
+    int client = GetClientOfUserId(this.UserID);
+    if (GetClientMenu(client, null) != MenuSource_None)
+    {
+      InternalShowMenu(client, "\10", 1); // thanks to Zira
+      CancelClientMenu(client, true, null);
+    }
+  }
 }
 
 enum struct Arena
@@ -160,7 +170,7 @@ public void OnPluginStart()
   LoadSpawnPoints();
   RegConsoleCmd("jointeam", CMD_JoinTeam);
   RegConsoleCmd("autoteam", CMD_AutoTeam);
-  RegConsoleCmd("add", CMD_AddMenu, "Usage: add <arena number/arena name>. Add to an arena.");
+  RegConsoleCmd("add", CMD_Add, "Usage: add <arena number/arena name>. Add to an arena.");
   RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
   RegConsoleCmd("debugplayers", CMD_DebugPlayers);
   RegConsoleCmd("debugarenas", CMD_DebugArenas);
@@ -210,14 +220,16 @@ public Action CMD_DebugPlayers(int client, int args)
 
 public Action CMD_DebugArenas(int client, int args)
 {
+  bool full = args > 0;
   for (int i = 0; i < g_Arenas.Length; i++)
   {
     Arena arena;
     g_Arenas.GetArray(i, arena);
+    Debug("");
     Debug("=====TICK %2.f====", GetTickedTime());
     Debug("%d - Arena: %s (%d)", i, arena.Name, arena.Id);
     Debug("%d - Status: %d", i, arena.Status);
-    Debug("Players:");
+    Debug("%d - Players:", i);
     if (arena.Players.Length == 0)
     {
       Debug("No players on arena %d", i);
@@ -230,6 +242,17 @@ public Action CMD_DebugArenas(int client, int args)
       Debug("   - Player %d - UserID: %d", j, player.UserID);
       Debug("   - Player %d - ArenaID: %d", j, player.ArenaId);
     }
+    if (full)
+    {
+      Debug("%d - Spawnpoints:", i);
+      for (int k = 0; k < arena.SpawnPoints.Length; k++)
+      {
+        SpawnPoint point;
+        arena.SpawnPoints.GetArray(k, point);
+        Debug("  - %d, %d, %d", point.OriginX, point.OriginY, point.OriginZ);
+      }
+    }
+    Debug("");
   }
   return Plugin_Handled;
 }
@@ -449,16 +472,23 @@ public void OnClientDisconnect(int client)
   g_Players.Erase(player.Index);
 }
 
-public Action CMD_AddMenu(int client, int args)
+public Action CMD_Add(int client, int args)
 {
   char arg1[8];
   GetCmdArg(1, arg1, sizeof(arg1));
   
-  int arenaIndex = StringToInt(arg1);
+  int arenaId = StringToInt(arg1);
   
-  if (arenaIndex > 0 && arenaIndex <= g_Arenas.Length)
+  if (arenaId > 0 && arenaId <= g_Arenas.Length)
   {
-    AddToQueue(client, arenaIndex - 1);
+    AddToQueue(client, arenaId);
+    
+    // Debug
+    Debug("[CMD_Add] Player chose arena %d", arenaId);
+    Arena arena;
+    arena = GetArena(arenaId);
+    Debug("[CMD_Add] This is arena %s", arena.Name);
+    
     return Plugin_Handled;
   }
   
@@ -473,13 +503,15 @@ void ShowAddMenu(int client)
   char item[32];
   char menuItemId[4];
   
+  // i starts at 0 because I need to access all array elements
   for (int i = 0; i < g_Arenas.Length; i++)
   {
     Arena arena;
     g_Arenas.GetArray(i, arena);
     Format(item, sizeof(item), "%s", arena.Name);
     
-    IntToString(i, menuItemId, sizeof(menuItemId));
+    // assign i + 1 to item ID so it corresponds to arena ID
+    IntToString(i + 1, menuItemId, sizeof(menuItemId));
     menu.AddItem(menuItemId, item);
   }
   
@@ -541,14 +573,17 @@ public Action CMD_AutoTeam(int client, int args)
 
 void AddToQueue(int client, int arenaid)
 {
-  
-  // Here we have to search for the arena the player was, prior to joining this new arena
-  // if getplayer.arena != 0; remove that player from that arena's player list
-  
   // Get player
   Player player;
   player = GetPlayer(GetClientUserId(client));
   
+  // Ignore if trying to add to the arena he's already at
+  if (player.ArenaId == arenaid)
+  {
+    return;
+  }
+  
+  // Remove from previous arena
   if (player.ArenaId != 0)
   {
     Arena playerArena;
@@ -556,6 +591,7 @@ void AddToQueue(int client, int arenaid)
     playerArena.RemovePlayer(player);
   }
   
+  // Get destination arena
   Arena arena;
   arena = GetArena(arenaid);
   
@@ -563,10 +599,11 @@ void AddToQueue(int client, int arenaid)
   {
     case Arena_Idle:
     {
-      // Set arena ID
-      // player.ArenaId = arenaid + 1;
-      g_Players.Set(0, arenaid, Player::ArenaId);
-      Debug("[AddToQueue] Adding %s to arena %d (arenaid %d)", player.Name, player.ArenaId, arenaid);
+      // Set player's new arena
+      g_Players.Set(player.Index, arenaid, Player::ArenaId);
+      player.ArenaId = arenaid;
+      Debug("[AddToQueue] Adding %s (index %d) to arena %d", player.Name, player.Index, arenaid);
+      Debug("[AddToQueue] player %s's arena is now ID %d (should be %d)", player.Name, player.ArenaId, arenaid);
       
       // Push player to arena
       arena.AddPlayer(player);
@@ -581,6 +618,9 @@ void AddToQueue(int client, int arenaid)
       arena.PlayerQueue.Push(GetClientUserId(client));
     }
   }
+  
+  // Close client's menu
+  player.CloseAddMenu();
 }
 
 void RemoveFromQueue(int client)
@@ -636,10 +676,8 @@ Action Timer_TeleportPlayer(Handle timer, DataPack pack)
   
   // Get arena
   Arena arena;
-  
-  Debug("[Timer_TeleportPlayer] trying to access arena index %d", player.ArenaId);
-  
-  g_Arenas.GetArray(player.ArenaId, arena);
+  arena = player.GetArena();
+  Debug("[Timer_TeleportPlayer] Getting arena %s (id %d)", arena.Name, player.ArenaId);
   
   // Pick a random spawn from that arena,
   SpawnPoint coords;
