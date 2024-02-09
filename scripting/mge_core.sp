@@ -530,6 +530,8 @@ public int Menu_Main(Menu menu, MenuAction action, int param1, int param2)
       AddToQueue(client, StringToInt(menuItemId));
     }
   }
+  
+  return 0;
 }
 
 public Action CMD_Remove(int client, int args)
@@ -635,6 +637,9 @@ void RemoveFromQueue(int client)
   g_Players.Set(player.Index, 0, Player::ArenaId);
   
   // Delete player from arena player list
+  Arena arena;
+  arena = player.GetArena();
+  arena.RemovePlayer(player);
 }
 
 Action Timer_ResetPlayer(Handle timer, DataPack pack)
@@ -647,6 +652,8 @@ Action Timer_ResetPlayer(Handle timer, DataPack pack)
   Debug("[Timer_ResetPlayer] Resetting player %s who died in arena %d", player.Name, player.ArenaId);
   
   ResetPlayer(player);
+  
+  return Plugin_Handled;
 }
 
 void ResetPlayer(Player player)
@@ -701,6 +708,8 @@ Action Timer_TeleportPlayer(Handle timer, DataPack pack)
   
   // Emit respawn sound
   EmitAmbientSound("items/spawn_item.wav", pointOrigin);
+  
+  return Plugin_Handled;
 }
 
 SpawnPoint GetArenaSpawnPoints(const char[] coords)
