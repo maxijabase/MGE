@@ -1,4 +1,4 @@
-#define DEBUG 1
+#define DEBUG 0
 
 #include <sourcemod>
 #include <tf2_stocks>
@@ -53,6 +53,7 @@ enum struct Player
   int Score;
   int ArenaId;
   float Handicap;
+  TFTeam Team;
   
   void Fill(int client)
   {
@@ -117,6 +118,82 @@ enum struct Arena
     this.SpawnPoints.GetArray(GetRandomInt(0, this.SpawnPoints.Length - 1), coords);
     return coords;
   }
+
+SpawnPoint GetBestSpawnPoint(Player player)
+{
+    // If no players in arena or only 1 player, return any random spawn
+    if (this.Players.Length <= 1)
+    {
+        return this.GetRandomSpawn();
+    }
+
+    // Create array to store randomized spawn indices
+    ArrayList randomizedSpawns = new ArrayList();
+    
+    // Fill array with spawn indices
+    for (int i = 0; i < this.SpawnPoints.Length; i++)
+    {
+        randomizedSpawns.Push(i);
+    }
+    
+    // Randomly shuffle the indices
+    randomizedSpawns.Sort(Sort_Random, Sort_Integer);
+    
+    // Get opponent's position
+    Player opponent;
+    float opponentPos[3];
+    
+    // Find opponent (first player that isn't us)
+    for (int i = 0; i < this.Players.Length; i++)
+    {
+        this.Players.GetArray(i, opponent);
+        if (opponent.UserID != player.UserID)
+        {
+            int opponentClient = GetClientOfUserId(opponent.UserID);
+            if (IsValidClient(opponentClient))
+            {
+                GetClientAbsOrigin(opponentClient, opponentPos);
+                break;
+            }
+        }
+    }
+
+    // Go through each spawn point in random order and check distance from opponent
+    float bestDistance = 0.0;
+    SpawnPoint bestSpawn;
+    
+    for (int i = 0; i < randomizedSpawns.Length; i++)
+    {
+        SpawnPoint spawn;
+        this.SpawnPoints.GetArray(randomizedSpawns.Get(i), spawn);
+        
+        float spawnPos[3];
+        spawnPos[0] = spawn.OriginX;
+        spawnPos[1] = spawn.OriginY; 
+        spawnPos[2] = spawn.OriginZ;
+        
+        float distance = GetVectorDistance(spawnPos, opponentPos);
+        
+        // If spawn is far enough away, use it immediately
+        if (distance > this.MinimumDistance)
+        {
+            delete randomizedSpawns;
+            return spawn;
+        }
+        
+        // Otherwise track the farthest spawn as fallback
+        if (distance > bestDistance)
+        {
+            bestDistance = distance;
+            bestSpawn = spawn;
+        }
+    }
+    
+    delete randomizedSpawns;
+    
+    // Return the farthest spawn if no spawns met minimum distance
+    return bestSpawn;
+}
   
   void AddPlayer(Player player)
   {
@@ -169,12 +246,13 @@ public void OnPluginStart()
   //ServerCommand("sm plugins unload mge_core");
   LoadSpawnPoints();
   RegConsoleCmd("jointeam", CMD_JoinTeam);
+  RegConsoleCmd("joinclass", CMD_JoinClass);
+  RegConsoleCmd("join_class", CMD_JoinClass);
   RegConsoleCmd("autoteam", CMD_AutoTeam);
   RegConsoleCmd("add", CMD_Add, "Usage: add <arena number/arena name>. Add to an arena.");
   RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
   RegConsoleCmd("debugplayers", CMD_DebugPlayers);
   RegConsoleCmd("debugarenas", CMD_DebugArenas);
-  RegConsoleCmd("kill", CMD_Kill);
   
   g_Players = new ArrayList(sizeof(Player));
   
@@ -279,19 +357,33 @@ public Action Event_OnRoundStart(Event event, const char[] name, bool dontBroadc
 
 public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
-  int userid = event.GetInt("userid");
+  // Get victim and attacker
+  int victimId = event.GetInt("userid");
+  int attackerId = event.GetInt("attacker");
   Player player;
-  player = GetPlayer(userid);
+  player = GetPlayer(victimId);
+
+  // Send victim info to reset timer
   DataPack pack = new DataPack();
   pack.WriteCellArray(player, sizeof(player));
+  pack.WriteCell(TF2_GetClientTeam(GetClientOfUserId(victimId)));
   CreateTimer(0.1, Timer_ResetPlayer, pack);
-  
+
+  // Regenerate killer
+  RequestFrame(RegenKiller, attackerId);
+
   /*
     - Skip death ringer deaths
     - Increase killer score
     - Calculate ELO if match is over
     - Process next match if queue is not empty
   */
+
+  return Plugin_Continue;
+}
+
+public void RegenKiller(int attacker) {
+  TF2_RegeneratePlayer(GetClientOfUserId(attacker));
 }
 
 public Action Event_OnPlayerSpawn(Event event, const char[] name, bool dontBroadcast)
@@ -316,11 +408,8 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
   /*
     - If player joins spec, remove him from queue
     - Prevent team switch altogether?
-    - ^ update: dont do this here! hook jointeam command for better UX
   */
-  
-  
-  
+    
 }
 
 public Action Event_OnWinPanelDisplay(Event event, const char[] name, bool dontBroadcast)
@@ -562,6 +651,43 @@ public Action CMD_JoinTeam(int client, int args)
   }
 }
 
+public Action CMD_JoinClass(int client, int args)
+{
+  // Get selected client class
+  char arg1[32];
+  GetCmdArg(1, arg1, sizeof(arg1));
+  TFClassType chosenClass = TF2_GetClass(arg1);
+  if (chosenClass == TFClass_Unknown)
+  {
+    return Plugin_Continue;
+  }
+  
+  // Get player
+  Player player;
+  player = GetPlayer(GetClientUserId(client));
+
+  // If he's not on any arena, ignore
+  if (player.ArenaId == 0)
+  {
+    return Plugin_Continue;
+  }
+
+  // Get arena
+  Arena arena;
+  arena = GetArena(player.ArenaId);
+
+  // Allow class change if it's on the allowed classes arena list
+  for (int i = 0; i <= arena.AllowedClasses.Length; i++)
+  {
+    if (arena.AllowedClasses.Get(i) == chosenClass) 
+    {
+      return Plugin_Continue;
+    }
+  }
+  ReplyToCommand(client, "This class is not allowed in this arena!");
+  return Plugin_Stop;
+}
+
 public Action CMD_AutoTeam(int client, int args)
 {
   // We will block autoteam command usage, and show add menu instead
@@ -607,13 +733,29 @@ void AddToQueue(int client, int arenaid)
       Debug("[AddToQueue] Adding %s (index %d) to arena %d", player.Name, player.Index, arenaid);
       Debug("[AddToQueue] player %s's arena is now ID %d (should be %d)", player.Name, player.ArenaId, arenaid);
       
-      // Push player to arena
-      arena.AddPlayer(player);
-      
-      // Reset player
+      // Create pack to send to reset player timer
       DataPack pack = new DataPack();
       pack.WriteCellArray(player, sizeof(player));
+      if (arena.Players.Length > 0)
+      {
+        Debug("blue - %d", arena.Players.Length);
+        pack.WriteCell(TFTeam_Blue);
+      }
+      else
+      {
+        Debug("red - %d", arena.Players.Length);
+        pack.WriteCell(TFTeam_Red);
+      }
+
+      // Push player to arena
+      arena.AddPlayer(player);
+
+      // Reset player
       CreateTimer(0.1, Timer_ResetPlayer, pack);
+
+      if (!arena.FourPlayers && arena.Players.Length == 2) {
+        arena.Status = Arena_Fight;
+      }
     }
     case Arena_Fight:
     {
@@ -647,6 +789,7 @@ Action Timer_ResetPlayer(Handle timer, DataPack pack)
   pack.Reset();
   Player player;
   pack.ReadCellArray(player, sizeof(player));
+  player.Team = pack.ReadCell();
   delete pack;
   
   Debug("[Timer_ResetPlayer] Resetting player %s who died in arena %d", player.Name, player.ArenaId);
@@ -661,8 +804,7 @@ void ResetPlayer(Player player)
   int client = GetClientOfUserId(player.UserID);
   
   // Respawn the player
-  TF2_ChangeClientTeam(client, TFTeam_Red);
-  TF2_SetPlayerClass(client, TFClass_Scout);
+  TF2_ChangeClientTeam(client, player.Team);
   TF2_RespawnPlayer(client);
   
   // Create teleport timer
@@ -674,42 +816,41 @@ void ResetPlayer(Player player)
 
 Action Timer_TeleportPlayer(Handle timer, DataPack pack)
 {
-  pack.Reset();
-  Player player;
-  pack.ReadCellArray(player, sizeof(player));
-  delete pack;
-  
-  int client = GetClientOfUserId(player.UserID);
-  
-  // Get arena
-  Arena arena;
-  arena = player.GetArena();
-  Debug("[Timer_TeleportPlayer] Getting arena %s (id %d)", arena.Name, player.ArenaId);
-  
-  // Pick a random spawn from that arena,
-  SpawnPoint coords;
-  coords = arena.GetRandomSpawn();
-  
-  // TODO: this fucking sucks
-  float pointOrigin[3];
-  pointOrigin[0] = coords.OriginX;
-  pointOrigin[1] = coords.OriginY;
-  pointOrigin[2] = coords.OriginZ;
-  
-  float pointAngles[3];
-  pointAngles[0] = coords.AngleX;
-  pointAngles[1] = coords.AngleY;
-  pointAngles[2] = coords.AngleZ;
-  
-  float pointVelocity[3] = { 0.0, 0.0, 0.0 };
-  
-  // Teleport him to the designed spawn point
-  TeleportEntity(client, pointOrigin, pointAngles, pointVelocity);
-  
-  // Emit respawn sound
-  EmitAmbientSound("items/spawn_item.wav", pointOrigin);
-  
-  return Plugin_Handled;
+    pack.Reset();
+    Player player;
+    pack.ReadCellArray(player, sizeof(player));
+    delete pack;
+    
+    int client = GetClientOfUserId(player.UserID);
+    
+    // Get arena
+    Arena arena;
+    arena = player.GetArena();
+    Debug("[Timer_TeleportPlayer] Getting arena %s (id %d)", arena.Name, player.ArenaId);
+    
+    // Get best spawn point based on opponent position
+    SpawnPoint coords;
+    coords = arena.GetBestSpawnPoint(player);
+    
+    float pointOrigin[3];
+    pointOrigin[0] = coords.OriginX;
+    pointOrigin[1] = coords.OriginY;
+    pointOrigin[2] = coords.OriginZ;
+    
+    float pointAngles[3];
+    pointAngles[0] = coords.AngleX;
+    pointAngles[1] = coords.AngleY;
+    pointAngles[2] = coords.AngleZ;
+    
+    float pointVelocity[3] = { 0.0, 0.0, 0.0 };
+    
+    // Teleport to the selected spawn point
+    TeleportEntity(client, pointOrigin, pointAngles, pointVelocity);
+    
+    // Emit respawn sound
+    EmitAmbientSound("items/spawn_item.wav", pointOrigin);
+    
+    return Plugin_Handled;
 }
 
 SpawnPoint GetArenaSpawnPoints(const char[] coords)
@@ -824,6 +965,7 @@ Player GetPlayer(int userid)
 Arena GetArena(int arenaId)
 {
   Arena arena;
+  arena.Id = -1;
   for (int i = 0; i < g_Arenas.Length; i++)
   {
     g_Arenas.GetArray(i, arena);
