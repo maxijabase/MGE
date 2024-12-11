@@ -1,4 +1,4 @@
-#define DEBUG 0
+#define DEBUG 1
 
 #include <sourcemod>
 #include <tf2_stocks>
@@ -119,8 +119,20 @@ enum struct Arena
     return coords;
   }
 
-SpawnPoint GetBestSpawnPoint(Player player)
-{
+  bool IsClassAllowed(TFClassType class)
+  {
+      for (int i = 0; i < this.AllowedClasses.Length; i++)
+      {
+          if (this.AllowedClasses.Get(i) == class)
+          {
+              return true;
+          }
+      }
+      return false;
+  }
+
+  SpawnPoint GetBestSpawnPoint(Player player)
+  {
     // If no players in arena or only 1 player, return any random spawn
     if (this.Players.Length <= 1)
     {
@@ -193,7 +205,7 @@ SpawnPoint GetBestSpawnPoint(Player player)
     
     // Return the farthest spawn if no spawns met minimum distance
     return bestSpawn;
-}
+  } 
   
   void AddPlayer(Player player)
   {
@@ -268,6 +280,8 @@ public void OnPluginStart()
     }
   }
 }
+
+
 
 public Action CMD_Kill(int client, int args)
 {
@@ -424,7 +438,9 @@ void LoadSpawnPoints()
   g_Arenas = new ArrayList(sizeof(Arena));
   
   char txtFile[256];
-  BuildPath(Path_SM, txtFile, sizeof(txtFile), "configs/mge_chillypunch_final4_fix2.mge.cfg");
+  char map[32];
+  GetCurrentMap(map, sizeof(map));
+  BuildPath(Path_SM, txtFile, sizeof(txtFile), "configs/mge/%s.cfg", map);
   
   char currentSection[32];
   GetCurrentMap(g_Map, sizeof(g_Map));
@@ -653,39 +669,50 @@ public Action CMD_JoinTeam(int client, int args)
 
 public Action CMD_JoinClass(int client, int args)
 {
-  // Get selected client class
-  char arg1[32];
-  GetCmdArg(1, arg1, sizeof(arg1));
-  TFClassType chosenClass = TF2_GetClass(arg1);
-  if (chosenClass == TFClass_Unknown)
-  {
-    return Plugin_Continue;
-  }
-  
-  // Get player
-  Player player;
-  player = GetPlayer(GetClientUserId(client));
+    // Get selected client class
+    char arg1[32];
+    GetCmdArg(1, arg1, sizeof(arg1));
+    TFClassType chosenClass = TF2_GetClass(arg1);
 
-  // If he's not on any arena, ignore
-  if (player.ArenaId == 0)
-  {
-    return Plugin_Continue;
-  }
-
-  // Get arena
-  Arena arena;
-  arena = GetArena(player.ArenaId);
-
-  // Allow class change if it's on the allowed classes arena list
-  for (int i = 0; i <= arena.AllowedClasses.Length; i++)
-  {
-    if (arena.AllowedClasses.Get(i) == chosenClass) 
+    if (chosenClass == TF2_GetPlayerClass(client))
     {
       return Plugin_Continue;
     }
-  }
-  ReplyToCommand(client, "This class is not allowed in this arena!");
-  return Plugin_Stop;
+
+    if (chosenClass == TFClass_Unknown)
+    {
+        return Plugin_Continue; // Let game handle invalid class names
+    }
+    
+    // Get player
+    Player player;
+    player = GetPlayer(GetClientUserId(client));
+
+    // If he's not on any arena, let them change
+    if (player.ArenaId == 0)
+    {
+        return Plugin_Continue;
+    }
+
+    // Get arena
+    Arena arena;
+    arena = player.GetArena();
+
+    // Block if class isn't allowed
+    if (!arena.IsClassAllowed(chosenClass))
+    {
+        PrintToChat(client, "This class is not allowed in this arena!");
+        return Plugin_Stop; // Block the class change
+    }
+
+    TF2_SetPlayerClass(client, chosenClass);
+    if (IsPlayerAlive(client))
+    {
+      DataPack pack = new DataPack();
+      pack.WriteCellArray(player, sizeof(player));
+      CreateTimer(0.1, Timer_ResetPlayer, pack);
+    }
+    return Plugin_Handled;
 }
 
 public Action CMD_AutoTeam(int client, int args)
@@ -736,16 +763,6 @@ void AddToQueue(int client, int arenaid)
       // Create pack to send to reset player timer
       DataPack pack = new DataPack();
       pack.WriteCellArray(player, sizeof(player));
-      if (arena.Players.Length > 0)
-      {
-        Debug("blue - %d", arena.Players.Length);
-        pack.WriteCell(TFTeam_Blue);
-      }
-      else
-      {
-        Debug("red - %d", arena.Players.Length);
-        pack.WriteCell(TFTeam_Red);
-      }
 
       // Push player to arena
       arena.AddPlayer(player);
@@ -789,7 +806,6 @@ Action Timer_ResetPlayer(Handle timer, DataPack pack)
   pack.Reset();
   Player player;
   pack.ReadCellArray(player, sizeof(player));
-  player.Team = pack.ReadCell();
   delete pack;
   
   Debug("[Timer_ResetPlayer] Resetting player %s who died in arena %d", player.Name, player.ArenaId);
@@ -801,17 +817,58 @@ Action Timer_ResetPlayer(Handle timer, DataPack pack)
 
 void ResetPlayer(Player player)
 {
-  int client = GetClientOfUserId(player.UserID);
-  
-  // Respawn the player
-  TF2_ChangeClientTeam(client, player.Team);
-  TF2_RespawnPlayer(client);
-  
-  // Create teleport timer
-  DataPack pack = new DataPack();
-  pack.WriteCellArray(player, sizeof(player));
-  
-  CreateTimer(0.1, Timer_TeleportPlayer, pack);
+    int client = GetClientOfUserId(player.UserID);
+    
+    // Get current class before team change
+    TFClassType currentClass = TF2_GetPlayerClass(client);
+    
+    // Get arena and verify class is allowed
+    Arena arena;
+    arena = player.GetArena();
+    
+    // Change team first
+    if (arena.Players.Length > 0)
+    {
+      TF2_ChangeClientTeam(client, TFTeam_Blue);
+    }
+    else
+    {
+      TF2_ChangeClientTeam(client, TFTeam_Red);
+    }
+    
+    // Check if current class is valid for this arena
+    if (currentClass == TFClass_Unknown || !arena.IsClassAllowed(currentClass))
+    {
+        // Get first allowed class from arena
+        currentClass = view_as<TFClassType>(arena.AllowedClasses.Get(0));
+        TF2_SetPlayerClass(client, currentClass);
+        PrintToChat(client, "Your previous class is not allowed in this arena. Switching.");
+    }
+    
+    // Cancel ongoing taunts
+    if (TF2_IsPlayerInCondition(client, TFCond_Taunting))
+    {
+      TF2_RemoveCondition(client, TFCond_Taunting);
+    }
+
+    // Respawn or regenerate
+    if (!IsPlayerAlive(client))
+    {
+      if (currentClass != TF2_GetPlayerClass(client))
+      {
+        TF2_SetPlayerClass(client, currentClass);
+      }
+      TF2_RespawnPlayer(client);
+    } else
+    {
+      TF2_RegeneratePlayer(client);
+      ExtinguishEntity(client);
+    }
+
+    // Create teleport timer
+    DataPack pack = new DataPack();
+    pack.WriteCellArray(player, sizeof(player));
+    CreateTimer(0.1, Timer_TeleportPlayer, pack);
 }
 
 Action Timer_TeleportPlayer(Handle timer, DataPack pack)
@@ -940,25 +997,15 @@ ArrayList GetArenaAllowedClasses(const char[] classes)
 Player GetPlayer(int userid)
 {
   Player player;
-  
-  Debug("[GetPlayer] total player count is %d", g_Players.Length);
   for (int i = 0; i < g_Players.Length; i++)
   {
     g_Players.GetArray(i, player);
-    Debug("[GetPlayer] searching through player %d: %s...", i, player.Name);
     if (player.UserID == userid)
     {
-      Debug("[GetPlayer] found player %s with arenaid %d", player.Name, player.ArenaId);
       player.Index = i;
       return player;
     }
   }
-  
-  if (player.UserID == 0)
-  {
-    Debug("[GetPlayer] userid was 0!!!");
-  }
-  
   return player;
 }
 
