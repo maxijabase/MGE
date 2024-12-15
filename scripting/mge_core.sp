@@ -53,12 +53,15 @@ enum struct Player
   int Score;
   int ArenaId;
   float Handicap;
-  TFTeam Team;
+  bool BotRequested;
+  TFClassType BotClass;
   
   void Fill(int client)
   {
     GetClientName(client, this.Name, sizeof(this.Name));
     this.UserID = GetClientUserId(client);
+    this.BotRequested = false;
+    this.BotClass = TFClass_Unknown;
   }
   
   Arena GetArena()
@@ -118,34 +121,34 @@ enum struct Arena
     this.SpawnPoints.GetArray(GetRandomInt(0, this.SpawnPoints.Length - 1), coords);
     return coords;
   }
-
+  
   bool IsClassAllowed(TFClassType class)
   {
-      for (int i = 0; i < this.AllowedClasses.Length; i++)
+    for (int i = 0; i < this.AllowedClasses.Length; i++)
+    {
+      if (this.AllowedClasses.Get(i) == class)
       {
-          if (this.AllowedClasses.Get(i) == class)
-          {
-              return true;
-          }
+        return true;
       }
-      return false;
+    }
+    return false;
   }
-
+  
   SpawnPoint GetBestSpawnPoint(Player player)
   {
     // If no players in arena or only 1 player, return any random spawn
     if (this.Players.Length <= 1)
     {
-        return this.GetRandomSpawn();
+      return this.GetRandomSpawn();
     }
-
+    
     // Create array to store randomized spawn indices
     ArrayList randomizedSpawns = new ArrayList();
     
     // Fill array with spawn indices
     for (int i = 0; i < this.SpawnPoints.Length; i++)
     {
-        randomizedSpawns.Push(i);
+      randomizedSpawns.Push(i);
     }
     
     // Randomly shuffle the indices
@@ -158,54 +161,54 @@ enum struct Arena
     // Find opponent (first player that isn't us)
     for (int i = 0; i < this.Players.Length; i++)
     {
-        this.Players.GetArray(i, opponent);
-        if (opponent.UserID != player.UserID)
+      this.Players.GetArray(i, opponent);
+      if (opponent.UserID != player.UserID)
+      {
+        int opponentClient = GetClientOfUserId(opponent.UserID);
+        if (IsValidClient(opponentClient))
         {
-            int opponentClient = GetClientOfUserId(opponent.UserID);
-            if (IsValidClient(opponentClient))
-            {
-                GetClientAbsOrigin(opponentClient, opponentPos);
-                break;
-            }
+          GetClientAbsOrigin(opponentClient, opponentPos);
+          break;
         }
+      }
     }
-
+    
     // Go through each spawn point in random order and check distance from opponent
     float bestDistance = 0.0;
     SpawnPoint bestSpawn;
     
     for (int i = 0; i < randomizedSpawns.Length; i++)
     {
-        SpawnPoint spawn;
-        this.SpawnPoints.GetArray(randomizedSpawns.Get(i), spawn);
-        
-        float spawnPos[3];
-        spawnPos[0] = spawn.OriginX;
-        spawnPos[1] = spawn.OriginY; 
-        spawnPos[2] = spawn.OriginZ;
-        
-        float distance = GetVectorDistance(spawnPos, opponentPos);
-        
-        // If spawn is far enough away, use it immediately
-        if (distance > this.MinimumDistance)
-        {
-            delete randomizedSpawns;
-            return spawn;
-        }
-        
-        // Otherwise track the farthest spawn as fallback
-        if (distance > bestDistance)
-        {
-            bestDistance = distance;
-            bestSpawn = spawn;
-        }
+      SpawnPoint spawn;
+      this.SpawnPoints.GetArray(randomizedSpawns.Get(i), spawn);
+      
+      float spawnPos[3];
+      spawnPos[0] = spawn.OriginX;
+      spawnPos[1] = spawn.OriginY;
+      spawnPos[2] = spawn.OriginZ;
+      
+      float distance = GetVectorDistance(spawnPos, opponentPos);
+      
+      // If spawn is far enough away, use it immediately
+      if (distance > this.MinimumDistance)
+      {
+        delete randomizedSpawns;
+        return spawn;
+      }
+      
+      // Otherwise track the farthest spawn as fallback
+      if (distance > bestDistance)
+      {
+        bestDistance = distance;
+        bestSpawn = spawn;
+      }
     }
     
     delete randomizedSpawns;
     
     // Return the farthest spawn if no spawns met minimum distance
     return bestSpawn;
-  } 
+  }
   
   void AddPlayer(Player player)
   {
@@ -260,11 +263,12 @@ public void OnPluginStart()
   RegConsoleCmd("jointeam", CMD_JoinTeam);
   RegConsoleCmd("joinclass", CMD_JoinClass);
   RegConsoleCmd("join_class", CMD_JoinClass);
-  RegConsoleCmd("autoteam", CMD_AutoTeam);
-  RegConsoleCmd("add", CMD_Add, "Usage: add <arena number/arena name>. Add to an arena.");
-  RegConsoleCmd("remove", CMD_Remove, "Remove from current arena.");
-  RegConsoleCmd("debugplayers", CMD_DebugPlayers);
-  RegConsoleCmd("debugarenas", CMD_DebugArenas);
+  RegConsoleCmd("sm_autoteam", CMD_AutoTeam);
+  RegConsoleCmd("sm_add", CMD_Add, "Usage: add <arena number/arena name>. Add to an arena.");
+  RegConsoleCmd("sm_remove", CMD_Remove, "Remove from current arena.");
+  RegConsoleCmd("sm_debugplayers", CMD_DebugPlayers);
+  RegConsoleCmd("sm_debugarenas", CMD_DebugArenas);
+  RegAdminCmd("sm_botme", CMD_AddBot, ADMFLAG_BAN, "Add bot to your arena");
   
   g_Players = new ArrayList(sizeof(Player));
   
@@ -281,7 +285,52 @@ public void OnPluginStart()
   }
 }
 
-
+public Action CMD_AddBot(int client, int args) {
+  // Get requesting player
+  Player player;
+  player = GetPlayer(GetClientUserId(client));
+  
+  // Make sure player is in an arena
+  if (player.ArenaId == 0) {
+    PrintToChat(client, "You must be in an arena to add a bot!");
+    return Plugin_Handled;
+  }
+  
+  // Default to Scout if no class specified
+  TFClassType botClass = TFClass_Scout;
+  
+  // If class was specified, validate and use it
+  if (args > 0) {
+    char arg1[32];
+    GetCmdArg(1, arg1, sizeof(arg1));
+    
+    TFClassType requestedClass = TF2_GetClass(arg1);
+    if (requestedClass == TFClass_Unknown) {
+      ReplyToCommand(client, "[SM] Invalid class specified. Usage: !botme [class]");
+      return Plugin_Handled;
+    }
+    botClass = requestedClass;
+  }
+  
+  // Store the chosen class for the bot
+  g_Players.Set(player.Index, botClass, Player::BotClass);
+  Debug("set player %N bot requested class to %s", client, botClass);
+  
+  // Mark player as requesting a bot
+  g_Players.Set(player.Index, true, Player::BotRequested);
+  
+  // Prevent bot from being kicked
+  FindConVar("tf_bot_quota").SetInt(1);
+  FindConVar("tf_bot_quota_mode").SetString("normal");
+  FindConVar("tf_bot_join_after_player").SetInt(0);
+  FindConVar("tf_bot_auto_vacate").SetInt(0);
+  
+  // Add bot with debugging
+  ServerCommand("tf_bot_add");
+  PrintToChat(client, "Requesting bot for arena %d...", player.ArenaId);
+  
+  return Plugin_Handled;
+}
 
 public Action CMD_Kill(int client, int args)
 {
@@ -358,7 +407,7 @@ public void OnMapStart()
   HookEvent("player_team", Event_OnPlayerJoinTeam, EventHookMode_Pre);
   HookEvent("teamplay_win_panel", Event_OnWinPanelDisplay, EventHookMode_Post);
   
-  FindConVar("mp_autoteambalance").SetInt(1);
+  FindConVar("mp_autoteambalance").SetInt(0);
   FindConVar("mp_teams_unbalance_limit").SetInt(32);
   FindConVar("mp_tournament").SetInt(0);
 }
@@ -376,23 +425,23 @@ public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroad
   int attackerId = event.GetInt("attacker");
   Player player;
   player = GetPlayer(victimId);
-
+  
   // Send victim info to reset timer
   DataPack pack = new DataPack();
   pack.WriteCellArray(player, sizeof(player));
   pack.WriteCell(TF2_GetClientTeam(GetClientOfUserId(victimId)));
   CreateTimer(0.1, Timer_ResetPlayer, pack);
-
+  
   // Regenerate killer
   RequestFrame(RegenKiller, attackerId);
-
+  
   /*
     - Skip death ringer deaths
     - Increase killer score
     - Calculate ELO if match is over
     - Process next match if queue is not empty
   */
-
+  
   return Plugin_Continue;
 }
 
@@ -419,11 +468,21 @@ public Action Event_OnPlayerHurt(Event event, const char[] name, bool dontBroadc
 
 public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBroadcast)
 {
-  /*
-    - If player joins spec, remove him from queue
-    - Prevent team switch altogether?
-  */
-    
+  int client = GetClientOfUserId(event.GetInt("userid"));
+  if (!client)
+  {
+    return Plugin_Continue;
+  }
+  TFTeam team = view_as<TFTeam>(event.GetInt("team"));
+  
+  if (team == TFTeam_Spectator)
+  {
+    Debug("Event_OnPlayerJoinTeam: player going to spec!!");
+    RemoveFromQueue(client, false); // Don't force team change since we're already changing teams
+  }
+  
+  event.SetInt("silent", true);
+  return Plugin_Changed;
 }
 
 public Action Event_OnWinPanelDisplay(Event event, const char[] name, bool dontBroadcast)
@@ -560,17 +619,70 @@ void LoadSpawnPoints()
 
 public void OnClientPostAdminCheck(int client)
 {
+  if (IsFakeClient(client))
+  {
+    Debug("Bot %N connected", client);
+    
+    // Make sure bot won't get kicked
+    SetEntityFlags(client, GetEntityFlags(client) | FL_FAKECLIENT);
+    
+    // Create a player entry for the bot
+    Player bot;
+    bot.Fill(client);
+    g_Players.PushArray(bot);
+    
+    // Find player who requested bot
+    Player requester;
+    for (int i = 0; i < g_Players.Length; i++)
+    {
+      g_Players.GetArray(i, requester);
+      if (requester.BotRequested)
+      {
+        Debug("Found requester: %s in arena %d", requester.Name, requester.ArenaId);
+        
+        // Add bot immediately instead of using timer
+        Debug("Adding bot %N directly to arena %d", client, requester.ArenaId);
+        AddToQueue(client, requester.ArenaId);
+        break;
+      }
+    }
+    return;
+  }
+  
+  // Normal player handling
   Player player;
   player.Fill(client);
   g_Players.PushArray(player);
-  
-  Debug("Player %s with userid %d was pushed.", player.Name, player.UserID);
+  Debug("Player %s joined with userid %d", player.Name, player.UserID);
   
   TF2_ChangeClientTeam(client, TFTeam_Spectator);
 }
 
+public Action Timer_AddBotToQueue(Handle timer, DataPack pack)
+{
+  pack.Reset();
+  int botUserId = pack.ReadCell();
+  int arenaId = pack.ReadCell();
+  delete pack;
+  
+  int bot = GetClientOfUserId(botUserId);
+  if (!IsValidClient(bot))
+  {
+    Debug("Bot became invalid before adding to queue");
+    return Plugin_Stop;
+  }
+  
+  Debug("Adding bot %N to arena %d", bot, arenaId);
+  AddToQueue(bot, arenaId);
+  
+  return Plugin_Stop;
+}
+
 public void OnClientDisconnect(int client)
 {
+  ConVar cvar = FindConVar("tf_bot_quota");
+  int quota = cvar.IntValue;
+  ServerCommand("tf_bot_quota %d", quota - 1);
   int userid = GetClientUserId(client);
   Player player;
   player = GetPlayer(userid);
@@ -650,14 +762,12 @@ public Action CMD_JoinTeam(int client, int args)
   // We will block manual team joining, but show add menu if they're on spec
   char team[16];
   GetCmdArg(1, team, sizeof(team));
-  
   if (!strcmp(team, "spectate"))
   {
-    RemoveFromQueue(client);
-    Debug("Removing from queue...");
     return Plugin_Continue;
   }
-  else {
+  else
+  {
     Debug("Can't switch teams!");
     if (TF2_GetClientTeam(client) == TFTeam_Spectator)
     {
@@ -669,50 +779,50 @@ public Action CMD_JoinTeam(int client, int args)
 
 public Action CMD_JoinClass(int client, int args)
 {
-    // Get selected client class
-    char arg1[32];
-    GetCmdArg(1, arg1, sizeof(arg1));
-    TFClassType chosenClass = TF2_GetClass(arg1);
-
-    if (chosenClass == TF2_GetPlayerClass(client))
-    {
-      return Plugin_Continue;
-    }
-
-    if (chosenClass == TFClass_Unknown)
-    {
-        return Plugin_Continue; // Let game handle invalid class names
-    }
-    
-    // Get player
-    Player player;
-    player = GetPlayer(GetClientUserId(client));
-
-    // If he's not on any arena, let them change
-    if (player.ArenaId == 0)
-    {
-        return Plugin_Continue;
-    }
-
-    // Get arena
-    Arena arena;
-    arena = player.GetArena();
-
-    // Block if class isn't allowed
-    if (!arena.IsClassAllowed(chosenClass))
-    {
-        PrintToChat(client, "This class is not allowed in this arena!");
-        return Plugin_Stop; // Block the class change
-    }
-
-    TF2_SetPlayerClass(client, chosenClass);
-    if (IsPlayerAlive(client))
-    {
-      DataPack pack = new DataPack();
-      pack.WriteCellArray(player, sizeof(player));
-      CreateTimer(0.1, Timer_ResetPlayer, pack);
-    }
-    return Plugin_Handled;
+  // Get selected client class
+  char arg1[32];
+  GetCmdArg(1, arg1, sizeof(arg1));
+  TFClassType chosenClass = TF2_GetClass(arg1);
+  
+  if (chosenClass == TF2_GetPlayerClass(client))
+  {
+    return Plugin_Continue;
+  }
+  
+  if (chosenClass == TFClass_Unknown)
+  {
+    return Plugin_Continue; // Let game handle invalid class names
+  }
+  
+  // Get player
+  Player player;
+  player = GetPlayer(GetClientUserId(client));
+  
+  // If he's not on any arena, let them change
+  if (player.ArenaId == 0)
+  {
+    return Plugin_Continue;
+  }
+  
+  // Get arena
+  Arena arena;
+  arena = player.GetArena();
+  
+  // Block if class isn't allowed
+  if (!arena.IsClassAllowed(chosenClass))
+  {
+    PrintToChat(client, "This class is not allowed in this arena!");
+    return Plugin_Stop; // Block the class change
+  }
+  
+  TF2_SetPlayerClass(client, chosenClass);
+  if (IsPlayerAlive(client))
+  {
+    DataPack pack = new DataPack();
+    pack.WriteCellArray(player, sizeof(player));
+    CreateTimer(0.1, Timer_ResetPlayer, pack);
+  }
+  return Plugin_Handled;
 }
 
 public Action CMD_AutoTeam(int client, int args)
@@ -763,13 +873,24 @@ void AddToQueue(int client, int arenaid)
       // Create pack to send to reset player timer
       DataPack pack = new DataPack();
       pack.WriteCellArray(player, sizeof(player));
-
+      
+      // We need to know how many players the arena has before setting team
+      if (arena.Players.Length > 0)
+      {
+        TF2_ChangeClientTeam(client, TFTeam_Blue);
+      }
+      else
+      {
+        Debug("arena.Players.Length %d", arena.Players.Length);
+        TF2_ChangeClientTeam(client, TFTeam_Red);
+      }
+      
       // Push player to arena
       arena.AddPlayer(player);
-
+      
       // Reset player
       CreateTimer(0.1, Timer_ResetPlayer, pack);
-
+      
       if (!arena.FourPlayers && arena.Players.Length == 2) {
         arena.Status = Arena_Fight;
       }
@@ -784,18 +905,21 @@ void AddToQueue(int client, int arenaid)
   player.CloseAddMenu();
 }
 
-void RemoveFromQueue(int client)
+void RemoveFromQueue(int client, bool forceTeamChange = true) // Add parameter
 {
-  // Send player to spectator
-  TF2_ChangeClientTeam(client, TFTeam_Spectator);
+  // Only force team change if explicitly requested
+  if (forceTeamChange && IsValidClient(client) && TF2_GetClientTeam(client) != TFTeam_Spectator)
+  {
+    ForcePlayerSuicide(client);
+    TF2_ChangeClientTeam(client, TFTeam_Spectator);
+  }
   
-  // Delete his arena ID
+  // Rest of removal logic
   Player player;
   player = GetPlayer(GetClientUserId(client));
   
   g_Players.Set(player.Index, 0, Player::ArenaId);
   
-  // Delete player from arena player list
   Arena arena;
   arena = player.GetArena();
   arena.RemovePlayer(player);
@@ -817,97 +941,102 @@ Action Timer_ResetPlayer(Handle timer, DataPack pack)
 
 void ResetPlayer(Player player)
 {
-    int client = GetClientOfUserId(player.UserID);
-    
-    // Get current class before team change
-    TFClassType currentClass = TF2_GetPlayerClass(client);
-    
-    // Get arena and verify class is allowed
-    Arena arena;
-    arena = player.GetArena();
-    
-    // Change team first
-    if (arena.Players.Length > 0)
-    {
-      TF2_ChangeClientTeam(client, TFTeam_Blue);
-    }
-    else
-    {
-      TF2_ChangeClientTeam(client, TFTeam_Red);
-    }
-    
-    // Check if current class is valid for this arena
-    if (currentClass == TFClass_Unknown || !arena.IsClassAllowed(currentClass))
-    {
-        // Get first allowed class from arena
-        currentClass = view_as<TFClassType>(arena.AllowedClasses.Get(0));
-        TF2_SetPlayerClass(client, currentClass);
-        PrintToChat(client, "Your previous class is not allowed in this arena. Switching.");
-    }
-    
-    // Cancel ongoing taunts
-    if (TF2_IsPlayerInCondition(client, TFCond_Taunting))
-    {
-      TF2_RemoveCondition(client, TFCond_Taunting);
-    }
-
-    // Respawn or regenerate
-    if (!IsPlayerAlive(client))
-    {
-      if (currentClass != TF2_GetPlayerClass(client))
-      {
-        TF2_SetPlayerClass(client, currentClass);
+  int client = GetClientOfUserId(player.UserID);
+  
+  // Get current class before team change  
+  TFClassType currentClass = TF2_GetPlayerClass(client);
+  
+  // Get arena
+  Arena arena;
+  arena = player.GetArena();
+  
+  if (IsFakeClient(client)) {
+    // For bots, find the player who requested them
+    Player requester;
+    for (int i = 0; i < g_Players.Length; i++) {
+      g_Players.GetArray(i, requester);
+      if (requester.BotRequested) {
+        // Found the requester - set bot's class to requester's chosen bot class
+        TFClassType requestedClass = requester.BotClass;
+        if (requestedClass != TFClass_Unknown) {
+          TF2_SetPlayerClass(client, requestedClass);
+          currentClass = requestedClass; // Update currentClass to match
+        }
+        break;
       }
-      TF2_RespawnPlayer(client);
-    } else
-    {
-      TF2_RegeneratePlayer(client);
-      ExtinguishEntity(client);
     }
-
-    // Create teleport timer
-    DataPack pack = new DataPack();
-    pack.WriteCellArray(player, sizeof(player));
-    CreateTimer(0.1, Timer_TeleportPlayer, pack);
+  } else {
+    // Original class validation for human players
+    if (currentClass == TFClass_Unknown || !arena.IsClassAllowed(currentClass)) {
+      currentClass = view_as<TFClassType>(arena.AllowedClasses.Get(0));
+      TF2_SetPlayerClass(client, currentClass);
+      PrintToChat(client, "Your previous class is not allowed in this arena. Switching.");
+    }
+  }
+  
+  // Cancel ongoing taunts
+  if (TF2_IsPlayerInCondition(client, TFCond_Taunting))
+  {
+    TF2_RemoveCondition(client, TFCond_Taunting);
+  }
+  
+  // Respawn or regenerate
+  if (!IsPlayerAlive(client))
+  {
+    if (currentClass != TF2_GetPlayerClass(client))
+    {
+      TF2_SetPlayerClass(client, currentClass);
+    }
+    TF2_RespawnPlayer(client);
+  } else
+  {
+    TF2_RegeneratePlayer(client);
+    ExtinguishEntity(client);
+  }
+  
+  // Create teleport timer
+  DataPack pack = new DataPack();
+  pack.WriteCellArray(player, sizeof(player));
+  CreateTimer(0.1, Timer_TeleportPlayer, pack);
 }
 
 Action Timer_TeleportPlayer(Handle timer, DataPack pack)
 {
-    pack.Reset();
-    Player player;
-    pack.ReadCellArray(player, sizeof(player));
-    delete pack;
-    
-    int client = GetClientOfUserId(player.UserID);
-    
-    // Get arena
-    Arena arena;
-    arena = player.GetArena();
-    Debug("[Timer_TeleportPlayer] Getting arena %s (id %d)", arena.Name, player.ArenaId);
-    
-    // Get best spawn point based on opponent position
-    SpawnPoint coords;
-    coords = arena.GetBestSpawnPoint(player);
-    
-    float pointOrigin[3];
-    pointOrigin[0] = coords.OriginX;
-    pointOrigin[1] = coords.OriginY;
-    pointOrigin[2] = coords.OriginZ;
-    
-    float pointAngles[3];
-    pointAngles[0] = coords.AngleX;
-    pointAngles[1] = coords.AngleY;
-    pointAngles[2] = coords.AngleZ;
-    
-    float pointVelocity[3] = { 0.0, 0.0, 0.0 };
-    
-    // Teleport to the selected spawn point
-    TeleportEntity(client, pointOrigin, pointAngles, pointVelocity);
-    
-    // Emit respawn sound
-    EmitAmbientSound("items/spawn_item.wav", pointOrigin);
-    
-    return Plugin_Handled;
+  pack.Reset();
+  Player player;
+  pack.ReadCellArray(player, sizeof(player));
+  delete pack;
+  
+  int client = GetClientOfUserId(player.UserID);
+  
+  // Get arena
+  Arena arena;
+  arena = player.GetArena();
+  Debug("[Timer_TeleportPlayer] Getting arena %s (id %d)", arena.Name, player.ArenaId);
+  
+  // Get best spawn point based on opponent position
+  SpawnPoint coords;
+  coords = arena.GetBestSpawnPoint(player);
+  
+  float pointOrigin[3];
+  pointOrigin[0] = coords.OriginX;
+  pointOrigin[1] = coords.OriginY;
+  pointOrigin[2] = coords.OriginZ;
+  
+  float pointAngles[3];
+  pointAngles[0] = coords.AngleX;
+  pointAngles[1] = coords.AngleY;
+  pointAngles[2] = coords.AngleZ;
+  
+  float pointVelocity[3] = { 0.0, 0.0, 0.0 };
+  
+  // Teleport to the selected spawn point
+  TeleportEntity(client, pointOrigin, pointAngles, pointVelocity);
+  
+  // Emit respawn sound
+  EmitAmbientSound("items/spawn_item.wav", pointOrigin);
+  
+  return Plugin_Handled;
 }
 
 SpawnPoint GetArenaSpawnPoints(const char[] coords)
