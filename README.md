@@ -8,6 +8,13 @@ First idea of working scheme
 - [x] Parse spawns config file
 - [x] Build !add menu
 - [ ] Handle 1v1/2v2 fight logic
+  - [x] Random spawns
+  - [x] Regen
+  - [ ] Duel start/finish detection
+  - [ ] Queue system 
+  - [ ] Countdown
+  - [ ] !botme
+  - [ ] 2v2
 - [ ] Expose forwards/natives
 
 ## mge_bball.smx
@@ -30,6 +37,6 @@ First idea of working scheme
 - [ ] Make win/join/welcome chat notices
 
 ## mge_hud.smx
-- [ ] Manage hud synchronizers
+- [ ] Handle HUD synchronizers
 
 
