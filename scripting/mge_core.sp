@@ -217,6 +217,10 @@ enum struct Arena
   
   void RemovePlayer(Player player)
   {
+    if (this.Players == null)
+    {
+      this.Players = new ArrayList(sizeof(Player));
+    }
     Player arenaPlayer;
     for (int i = 0; i < this.Players.Length; i++)
     {
@@ -433,7 +437,10 @@ public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroad
   CreateTimer(0.1, Timer_ResetPlayer, pack);
   
   // Regenerate killer
-  RequestFrame(RegenKiller, attackerId);
+  if (attackerId != 0)
+  {
+    RequestFrame(RegenKiller, attackerId);
+  }
   
   /*
     - Skip death ringer deaths
@@ -478,7 +485,7 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
   if (team == TFTeam_Spectator)
   {
     Debug("Event_OnPlayerJoinTeam: player going to spec!!");
-    RemoveFromQueue(client, false); // Don't force team change since we're already changing teams
+    RemoveFromQueue(client, false);
   }
   
   event.SetInt("silent", true);
