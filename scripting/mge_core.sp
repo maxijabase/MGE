@@ -14,6 +14,11 @@
 #define MAXARENAS 63
 #define MAXSPAWNS 15
 
+#define AN_THREE "vo/announcer_begins_3sec.mp3"
+#define AN_TWO "vo/announcer_begins_2sec.mp3"
+#define AN_ONE "vo/announcer_begins_1sec.mp3"
+#define AN_FIGHT "vo/announcer_am_roundstart04.mp3"
+
 ArrayList g_Arenas;
 ArrayList g_Players;
 char g_Map[64];
@@ -168,33 +173,33 @@ enum struct Arena
       Debug("[Arena %s] RED scored! Score is now RED %d - BLU %d [%s players]", 
         this.Name, 
         this.RedScore, 
-        this.BluScore,
+        this.BluScore, 
         this.FourPlayers ? "4" : "2"
-      );
+        );
     } else {
       this.BluScore++;
       Debug("[Arena %s] BLU scored! Score is now RED %d - BLU %d [%s players]", 
         this.Name, 
         this.RedScore, 
-        this.BluScore,
+        this.BluScore, 
         this.FourPlayers ? "4" : "2"
-      );
+        );
     }
     
     // Store updated arena
     g_Arenas.SetArray(this.Id - 1, this);
   }
-
+  
   bool HasWinner() {
     return (this.RedScore >= this.FragLimit || this.BluScore >= this.FragLimit);
   }
   
   TFTeam GetWinningTeam() {
-    if (this.RedScore >= this.FragLimit) return TFTeam_Red;
-    if (this.BluScore >= this.FragLimit) return TFTeam_Blue;
+    if (this.RedScore >= this.FragLimit)return TFTeam_Red;
+    if (this.BluScore >= this.FragLimit)return TFTeam_Blue;
     return TFTeam_Unassigned;
   }
-
+  
   void BlockWeapons(int client, float duration)
   {
     float gameTime = GetGameTime();
@@ -431,6 +436,12 @@ public Action CMD_AddBot(int client, int args) {
     return Plugin_Handled;
   }
   
+  // Check if player already has a bot requested
+  if (player.BotRequested) {
+    PrintToChat(client, "You already have a bot request pending!");
+    return Plugin_Handled;
+  }
+  
   // Default to Scout if no class specified
   TFClassType botClass = TFClass_Scout;
   
@@ -561,6 +572,11 @@ public void OnMapStart()
   FindConVar("mp_autoteambalance").SetInt(0);
   FindConVar("mp_teams_unbalance_limit").SetInt(32);
   FindConVar("mp_tournament").SetInt(0);
+
+  PrecacheSound(AN_THREE);
+  PrecacheSound(AN_TWO); 
+  PrecacheSound(AN_ONE);
+  PrecacheSound(AN_FIGHT);
 }
 
 public Action Event_OnRoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -645,6 +661,29 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
     
     Arena arena;
     arena = player.GetArena();
+    
+    // If this player requested a bot, kick it
+    if (player.BotRequested)
+    {
+      Debug("Player requested a bot - kicking it");
+      // Find and kick the bot in this arena
+      for (int i = 1; i <= MaxClients; i++)
+      {
+        if (IsValidClient(i) && IsFakeClient(i))
+        {
+          Player botPlayer;
+          botPlayer = GetPlayer(GetClientUserId(i));
+          if (botPlayer.ArenaId == player.ArenaId)
+          {
+            Debug("Found bot in arena %d - kicking", player.ArenaId);
+            KickClient(i, "Bot requester went to spectator");
+            // Reset the bot request flag
+            g_Players.Set(player.Index, false, Player::BotRequested);
+            break;
+          }
+        }
+      }
+    }
     
     if (arena.Status == Arena_Fight)
     {
@@ -815,6 +854,9 @@ public void OnClientPostAdminCheck(int client)
       {
         Debug("Found requester: %s in arena %d", requester.Name, requester.ArenaId);
         
+        // Reset the BotRequested flag BEFORE adding the bot
+        g_Players.Set(i, false, Player::BotRequested);
+        
         // Add bot immediately instead of using timer
         Debug("Adding bot %N directly to arena %d", client, requester.ArenaId);
         AddToQueue(client, requester.ArenaId);
@@ -866,10 +908,21 @@ Action Timer_Countdown(Handle timer, any arenaId) {
   // Show countdown messages if between 3 and 1
   if (arena.CountdownValue <= 3 && arena.CountdownValue >= 1) {
     char message[32];
+    char soundFile[64];
+
     switch (arena.CountdownValue) {
-      case 1:message = "ONE";
-      case 2:message = "TWO";
-      case 3:message = "THREE";
+      case 1: {
+        message = "ONE";
+        soundFile = AN_ONE;
+      }
+      case 2: {
+        message = "TWO";
+        soundFile = AN_TWO;
+      }
+      case 3: {
+        message = "THREE";
+        soundFile = AN_THREE;
+      }
     }
     
     // Show to all players
@@ -879,6 +932,7 @@ Action Timer_Countdown(Handle timer, any arenaId) {
       int client = GetClientOfUserId(player.UserID);
       if (IsValidClient(client)) {
         PrintCenterText(client, message);
+        EmitSoundToClient(client, soundFile);
       }
     }
   }
@@ -893,6 +947,7 @@ Action Timer_Countdown(Handle timer, any arenaId) {
       int client = GetClientOfUserId(player.UserID);
       if (IsValidClient(client)) {
         PrintCenterText(client, "FIGHT!");
+        EmitSoundToClient(client, AN_FIGHT);
       }
     }
     
@@ -1100,7 +1155,7 @@ void AddToQueue(int client, int arenaid)
     {
       // Find first available position
       bool positionFound = false;
-      for (int i = 0; i < 2; i++) { // Only check first two positions for 1v1
+      for (int i = 0; i < 2; i++) {  // Only check first two positions for 1v1
         bool positionTaken = false;
         
         // Check if this position is taken
@@ -1140,7 +1195,7 @@ void AddToQueue(int client, int arenaid)
         TF2_ChangeClientTeam(client, TFTeam_Red);
       }
       
-      // Continue with rest of queue add logic...
+      // Set player's arena
       g_Players.Set(player.Index, arenaid, Player::ArenaId);
       player.ArenaId = arenaid;
       
