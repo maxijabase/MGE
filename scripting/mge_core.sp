@@ -56,7 +56,6 @@ enum struct Player
   int Index;
   int UserID;
   int ELO;
-  int Score;
   int ArenaId;
   float Handicap;
   bool BotRequested;
@@ -156,11 +155,48 @@ enum struct Arena
   bool Turris;
   bool KOTH;
   GameplayType Gameplay;
-  
   int CountdownValue;
   Handle CountdownTimer;
+  int RedScore;
+  int BluScore;
   
-  void BlockWeapons(int client, float duration) {
+  void AddScore(int client) {
+    // Determine team and increment appropriate score
+    TFTeam team = TF2_GetClientTeam(client);
+    if (team == TFTeam_Red) {
+      this.RedScore++;
+      Debug("[Arena %s] RED scored! Score is now RED %d - BLU %d [%s players]", 
+        this.Name, 
+        this.RedScore, 
+        this.BluScore,
+        this.FourPlayers ? "4" : "2"
+      );
+    } else {
+      this.BluScore++;
+      Debug("[Arena %s] BLU scored! Score is now RED %d - BLU %d [%s players]", 
+        this.Name, 
+        this.RedScore, 
+        this.BluScore,
+        this.FourPlayers ? "4" : "2"
+      );
+    }
+    
+    // Store updated arena
+    g_Arenas.SetArray(this.Id - 1, this);
+  }
+
+  bool HasWinner() {
+    return (this.RedScore >= this.FragLimit || this.BluScore >= this.FragLimit);
+  }
+  
+  TFTeam GetWinningTeam() {
+    if (this.RedScore >= this.FragLimit) return TFTeam_Red;
+    if (this.BluScore >= this.FragLimit) return TFTeam_Blue;
+    return TFTeam_Unassigned;
+  }
+
+  void BlockWeapons(int client, float duration)
+  {
     float gameTime = GetGameTime();
     for (int slot = 0; slot <= 2; slot++) {
       int weapon = GetPlayerWeaponSlot(client, slot);
@@ -180,8 +216,9 @@ enum struct Arena
       CreateTimer(0.1, Timer_ResetPlayer, pack);
     }
   }
-
-  void StartCountdown() {
+  
+  void StartCountdown()
+  {
     // Set initial countdown value 
     this.CountdownValue = this.CountdownTime;
     
@@ -533,42 +570,37 @@ public Action Event_OnRoundStart(Event event, const char[] name, bool dontBroadc
 }
 
 public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroadcast) {
- // Get victim and attacker
- int victimId = event.GetInt("userid");
- Player victim;
- victim = GetPlayer(victimId);
- 
- // Send victim info to reset timer
- DataPack pack = new DataPack();
- pack.WriteCellArray(victim, sizeof(victim));
- pack.WriteCell(TF2_GetClientTeam(GetClientOfUserId(victimId)));
- CreateTimer(0.1, Timer_ResetPlayer, pack);
-
- // Check if victim was in an active MGE fight
- if (victim.ArenaId != 0) {
-   Arena arena;
-   arena = victim.GetArena();
-   if (arena.Status == Arena_Fight) {
-     // Get opponent and regenerate them
-     Player opponent;
-     opponent = victim.GetOpponent();
-     if (opponent.UserID != 0) {
-       int opponentClient = GetClientOfUserId(opponent.UserID);
-       if (IsValidClient(opponentClient)) {
-         RequestFrame(RegenKiller, opponent.UserID);
-       }
-     }
-   }
- }
- 
- /*
-   - Skip death ringer deaths
-   - Increase killer score
-   - Calculate ELO if match is over
-   - Process next match if queue is not empty
- */
- 
- return Plugin_Continue;
+  // Get victim and attacker
+  int victimId = event.GetInt("userid");
+  Player victim;
+  victim = GetPlayer(victimId);
+  
+  // Send victim info to reset timer
+  DataPack pack = new DataPack();
+  pack.WriteCellArray(victim, sizeof(victim));
+  pack.WriteCell(TF2_GetClientTeam(GetClientOfUserId(victimId)));
+  CreateTimer(0.1, Timer_ResetPlayer, pack);
+  
+  // Check if victim was in an active MGE fight
+  if (victim.ArenaId != 0) {
+    Arena arena;
+    arena = victim.GetArena();
+    if (arena.Status == Arena_Fight) {
+      // Get opponent
+      Player opponent;
+      opponent = victim.GetOpponent();
+      if (opponent.UserID != 0) {
+        int opponentClient = GetClientOfUserId(opponent.UserID);
+        if (IsValidClient(opponentClient)) {
+          // Regenerate them
+          RequestFrame(RegenKiller, opponent.UserID);
+        }
+        arena.AddScore(opponentClient);
+      }
+    }
+  }
+  
+  return Plugin_Continue;
 }
 
 public void RegenKiller(int attacker) {
@@ -582,6 +614,7 @@ public Action Event_OnPlayerSpawn(Event event, const char[] name, bool dontBroad
     - Restore ammo count
     - 
   */
+  return Plugin_Continue;
 }
 
 public Action Event_OnPlayerHurt(Event event, const char[] name, bool dontBroadcast)
@@ -590,6 +623,7 @@ public Action Event_OnPlayerHurt(Event event, const char[] name, bool dontBroadc
     - ENDIF calculations idk
     - Expose to forwards for logging
   */
+  return Plugin_Continue;
 }
 
 public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBroadcast)
@@ -630,6 +664,7 @@ public Action Event_OnWinPanelDisplay(Event event, const char[] name, bool dontB
   /*
     - Disable stats so people leaving at the end of the map don't lose points.
   */
+  return Plugin_Continue;
 }
 
 void LoadSpawnPoints()
@@ -1077,7 +1112,7 @@ void AddToQueue(int client, int arenaid)
           if (IsValidClient(existingClient)) {
             TFTeam existingTeam = TF2_GetClientTeam(existingClient);
             if ((i == 0 && existingTeam == TFTeam_Red) || 
-                (i == 1 && existingTeam == TFTeam_Blue)) {
+              (i == 1 && existingTeam == TFTeam_Blue)) {
               positionTaken = true;
               break;
             }
