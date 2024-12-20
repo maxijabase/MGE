@@ -72,6 +72,7 @@ enum struct Player
     this.UserID = GetClientUserId(client);
     this.BotRequested = false;
     this.BotClass = TFClass_Unknown;
+    this.Index = g_Players.Length;
   }
   
   Arena GetArena()
@@ -170,22 +171,13 @@ enum struct Arena
     TFTeam team = TF2_GetClientTeam(client);
     if (team == TFTeam_Red) {
       this.RedScore++;
-      Debug("[Arena %s] RED scored! Score is now RED %d - BLU %d [%s players]", 
-        this.Name, 
-        this.RedScore, 
-        this.BluScore, 
-        this.FourPlayers ? "4" : "2"
-        );
     } else {
       this.BluScore++;
-      Debug("[Arena %s] BLU scored! Score is now RED %d - BLU %d [%s players]", 
-        this.Name, 
-        this.RedScore, 
-        this.BluScore, 
-        this.FourPlayers ? "4" : "2"
-        );
     }
     
+    // Debug current score
+    Debug("Score: RED %d - %d BLUE", this.RedScore, this.BluScore);
+
     // Store updated arena
     g_Arenas.SetArray(this.Id - 1, this);
   }
@@ -211,17 +203,29 @@ enum struct Arena
     }
   }
   
-  void ResetPlayers()
+  void StartDuel(float interval)
+  {
+    CreateTimer(interval, Timer_StartCountdown, this.Id);
+    this.ResetPlayers(interval);
+
+    this.RedScore = 0;
+    this.BluScore = 0;
+
+    // Update arena in global array
+    g_Arenas.SetArray(this.Id - 1, this);
+  }
+
+  void ResetPlayers(float interval)
   {
     for (int i = 0; i < this.Players.Length; i++) {
       Player player;
       this.Players.GetArray(i, player);
       DataPack pack = new DataPack();
       pack.WriteCellArray(player, sizeof(player));
-      CreateTimer(0.1, Timer_ResetPlayer, pack);
+      CreateTimer(interval, Timer_ResetPlayer, pack);
     }
   }
-  
+
   void StartCountdown()
   {
     // Set initial countdown value 
@@ -392,6 +396,13 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
   }
   
   g_Late = late;
+
+  RegPluginLibrary("mge");
+
+  // CreateNative("MGE.AddPlayer", Native_AddPlayer);
+  // CreateNative("MGE.RemovePlayer", Native_RemovePlayer);
+  // CreateNative("MGE.GetPlayers", Native_GetPlayers);
+  // CreateNative("MGE.GetArenas", Native_GetArenas);
   
   return APLRes_Success;
 }
@@ -399,7 +410,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnPluginStart()
 {
   //ServerCommand("sm plugins unload mge_core");
-  LoadSpawnPoints();
+  LoadArenas();
   RegConsoleCmd("jointeam", CMD_JoinTeam);
   RegConsoleCmd("joinclass", CMD_JoinClass);
   RegConsoleCmd("join_class", CMD_JoinClass);
@@ -408,6 +419,7 @@ public void OnPluginStart()
   RegConsoleCmd("sm_remove", CMD_Remove, "Remove from current arena.");
   RegConsoleCmd("sm_debugplayers", CMD_DebugPlayers);
   RegConsoleCmd("sm_debugarenas", CMD_DebugArenas);
+  RegConsoleCmd("kill", CMD_Kill);
   RegAdminCmd("sm_botme", CMD_AddBot, ADMFLAG_BAN, "Add bot to your arena");
   
   g_Players = new ArrayList(sizeof(Player));
@@ -460,7 +472,6 @@ public Action CMD_AddBot(int client, int args) {
   
   // Store the chosen class for the bot
   g_Players.Set(player.Index, botClass, Player::BotClass);
-  Debug("set player %N bot requested class to %s", client, botClass);
   
   // Mark player as requesting a bot
   g_Players.Set(player.Index, true, Player::BotRequested);
@@ -586,36 +597,75 @@ public Action Event_OnRoundStart(Event event, const char[] name, bool dontBroadc
 }
 
 public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroadcast) {
-  // Get victim and attacker
+  // Skip if it's a dead ringer death
+  if (event.GetInt("death_flags") & 32)
+  {
+      return Plugin_Continue;
+  }
+
+  // Get victim
   int victimId = event.GetInt("userid");
+  if (!IsValidClient(GetClientOfUserId(victimId))) {
+    return Plugin_Continue;
+  }
+
   Player victim;
   victim = GetPlayer(victimId);
   
-  // Send victim info to reset timer
+  // Make pack
   DataPack pack = new DataPack();
   pack.WriteCellArray(victim, sizeof(victim));
-  pack.WriteCell(TF2_GetClientTeam(GetClientOfUserId(victimId)));
-  CreateTimer(0.1, Timer_ResetPlayer, pack);
-  
-  // Check if victim was in an active MGE fight
-  if (victim.ArenaId != 0) {
-    Arena arena;
-    arena = victim.GetArena();
-    if (arena.Status == Arena_Fight) {
-      // Get opponent
-      Player opponent;
-      opponent = victim.GetOpponent();
-      if (opponent.UserID != 0) {
-        int opponentClient = GetClientOfUserId(opponent.UserID);
-        if (IsValidClient(opponentClient)) {
-          // Regenerate them
-          RequestFrame(RegenKiller, opponent.UserID);
-        }
-        arena.AddScore(opponentClient);
+
+  // Get arena
+  Arena arena;
+  arena = victim.GetArena();
+
+  // Get opponent
+  Player opponent;
+  opponent = victim.GetOpponent();
+
+  // Check for arena status, victim arena ID and opponent validity
+  if (arena.Status != Arena_Fight || victim.ArenaId == 0 || opponent.UserID == 0) {
+    CreateTimer(0.1, Timer_ResetPlayer, pack);
+    return Plugin_Continue;
+  }
+
+  // Regen opponent
+  int opponentClient = GetClientOfUserId(opponent.UserID);
+  if (IsValidClient(opponentClient)) {
+    RequestFrame(RegenKiller, opponent.UserID);
+  }
+
+  // Add score to arena
+  arena.AddScore(opponentClient);
+
+  // Check if this death results in a win
+  if (arena.HasWinner()) {
+    // Get winning team
+    TFTeam winningTeam = arena.GetWinningTeam();
+    char winningTeamString[16];
+    switch (winningTeam) {
+      case TFTeam_Red: winningTeamString = "RED";
+      case TFTeam_Blue: winningTeamString = "BLU";
+      default: winningTeamString = "UNKNOWN";
+    }
+
+    // Announce winner
+    for (int i = 0; i < arena.Players.Length; i++) {
+      Player player;
+      arena.Players.GetArray(i, player);
+      int client = GetClientOfUserId(player.UserID);
+      if (IsValidClient(client)) {
+        PrintCenterText(client, "WINNER: %s", winningTeamString);
       }
     }
+
+    // Reset arena
+    arena.StartDuel(3.0);
+  } else {
+    CreateTimer(0.1, Timer_ResetPlayer, pack);
   }
-  
+
   return Plugin_Continue;
 }
 
@@ -654,18 +704,22 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
   
   if (team == TFTeam_Spectator)
   {
-    Debug("Event_OnPlayerJoinTeam: player going to spec!!");
     // Set arena back to idle if it wasn't
     Player player;
     player = GetPlayer(userid);
     
+    // If player is not in an arena, do nothing
+    if (player.ArenaId == 0)
+    {
+      return Plugin_Continue;
+    }
+
     Arena arena;
     arena = player.GetArena();
     
     // If this player requested a bot, kick it
     if (player.BotRequested)
     {
-      Debug("Player requested a bot - kicking it");
       // Find and kick the bot in this arena
       for (int i = 1; i <= MaxClients; i++)
       {
@@ -675,7 +729,6 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
           botPlayer = GetPlayer(GetClientUserId(i));
           if (botPlayer.ArenaId == player.ArenaId)
           {
-            Debug("Found bot in arena %d - kicking", player.ArenaId);
             KickClient(i, "Bot requester went to spectator");
             // Reset the bot request flag
             g_Players.Set(player.Index, false, Player::BotRequested);
@@ -687,7 +740,7 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
     
     if (arena.Status == Arena_Fight)
     {
-      Debug(" ***************** arena back to idle!!");
+      // TODO: cretae methods inside Arena to set state
       arena.Status = Arena_Idle;
       g_Arenas.Set(arena.Id - 1, Arena_Idle, Arena::Status);
     }
@@ -706,8 +759,9 @@ public Action Event_OnWinPanelDisplay(Event event, const char[] name, bool dontB
   return Plugin_Continue;
 }
 
-void LoadSpawnPoints()
+void LoadArenas()
 {
+  Debug("Loading MGE arenas...");
   g_Arenas = new ArrayList(sizeof(Arena));
   
   char txtFile[256];
@@ -895,7 +949,25 @@ public Action Timer_AddBotToQueue(Handle timer, DataPack pack)
   return Plugin_Stop;
 }
 
-Action Timer_Countdown(Handle timer, any arenaId) {
+public Action Timer_StartCountdown(Handle timer, int arenaId)
+{
+  // Get arena
+  Arena arena;
+  arena = GetArena(arenaId);
+  
+  // Validate arena
+  if (arena.Id <= 0)
+  {
+    return Plugin_Stop;
+  }
+  
+  // Start countdown
+  arena.StartCountdown();
+  
+  return Plugin_Handled;
+}
+
+public Action Timer_Countdown(Handle timer, any arenaId) {
   // Get arena
   Arena arena;
   arena = GetArena(arenaId);
@@ -969,12 +1041,18 @@ Action Timer_Countdown(Handle timer, any arenaId) {
 
 public void OnClientDisconnect(int client)
 {
-  ConVar cvar = FindConVar("tf_bot_quota");
-  int quota = cvar.IntValue;
-  ServerCommand("tf_bot_quota %d", quota - 1);
+  // Get player
   int userid = GetClientUserId(client);
   Player player;
   player = GetPlayer(userid);
+
+  // Remove player from queue if he's in an arena
+  if (player.ArenaId != 0)
+  {
+    RemoveFromQueue(client);
+  }
+
+  // Remove player from global list
   g_Players.Erase(player.Index);
 }
 
@@ -1120,34 +1198,34 @@ public Action CMD_AutoTeam(int client, int args)
 
 void AddToQueue(int client, int arenaid)
 {
-  Debug("\n[AddToQueue] Starting add process for client %N to arena %d", client, arenaid);
+  // Debug("\n[AddToQueue] Starting add process for client %N to arena %d", client, arenaid);
   
   // Get player
   Player player;
   player = GetPlayer(GetClientUserId(client));
-  Debug("[AddToQueue] Retrieved player %s with index %d", player.Name, player.Index);
+  // Debug("[AddToQueue] Retrieved player %s with index %d", player.Name, player.Index);
   
   // Ignore if trying to add to the arena they're already at
   if (player.ArenaId == arenaid)
   {
-    Debug("[AddToQueue] Player %s is already in arena %d - aborting", player.Name, arenaid);
+    // Debug("[AddToQueue] Player %s is already in arena %d - aborting", player.Name, arenaid);
     return;
   }
   
   // Remove from previous arena
   if (player.ArenaId != 0)
   {
-    Debug("[AddToQueue] Player %s was in arena %d - removing first", player.Name, player.ArenaId);
+    // Debug("[AddToQueue] Player %s was in arena %d - removing first", player.Name, player.ArenaId);
     Arena playerArena;
     playerArena = player.GetArena();
     playerArena.RemovePlayer(player);
-    Debug("[AddToQueue] Successfully removed player from previous arena");
+    // Debug("[AddToQueue] Successfully removed player from previous arena");
   }
   
   // Get destination arena
   Arena arena;
   arena = GetArena(arenaid);
-  Debug("[AddToQueue] Retrieved destination arena %s (id %d)", arena.Name, arena.Id);
+  // Debug("[AddToQueue] Retrieved destination arena %s (id %d)", arena.Name, arena.Id);
   
   switch (arena.Status)
   {
@@ -1176,12 +1254,12 @@ void AddToQueue(int client, int arenaid)
         
         // Found free position
         if (!positionTaken) {
-          Debug("[AddToQueue] Found free position %d", i);
+          // Debug("[AddToQueue] Found free position %d", i);
           if (i == 0) {
-            Debug("[AddToQueue] Setting %s to RED team (position 0)", player.Name);
+            // Debug("[AddToQueue] Setting %s to RED team (position 0)", player.Name);
             TF2_ChangeClientTeam(client, TFTeam_Red);
           } else {
-            Debug("[AddToQueue] Setting %s to BLU team (position 1)", player.Name);
+            // Debug("[AddToQueue] Setting %s to BLU team (position 1)", player.Name);
             TF2_ChangeClientTeam(client, TFTeam_Blue);
           }
           positionFound = true;
@@ -1191,7 +1269,7 @@ void AddToQueue(int client, int arenaid)
       
       // If no position found, something's wrong
       if (!positionFound) {
-        Debug("[AddToQueue] WARNING: No free position found - defaulting to RED");
+        // Debug("[AddToQueue] WARNING: No free position found - defaulting to RED");
         TF2_ChangeClientTeam(client, TFTeam_Red);
       }
       
@@ -1205,32 +1283,31 @@ void AddToQueue(int client, int arenaid)
       
       // Push player to arena
       arena.AddPlayer(player);
-      Debug("[AddToQueue] Added player to arena - now has %d players", arena.Players.Length);
+      // Debug("[AddToQueue] Added player to arena - now has %d players", arena.Players.Length);
       
       // Reset player
       CreateTimer(0.1, Timer_ResetPlayer, pack);
-      Debug("[AddToQueue] Created reset timer for player");
+      // Debug("[AddToQueue] Created reset timer for player");
       
       // Start countdown if arena is full
       if (!arena.FourPlayers && arena.Players.Length == 2) {
-        Debug("[AddToQueue] Arena filled (2 players) - starting countdown");
+        // Debug("[AddToQueue] Arena filled (2 players) - starting countdown");
         arena.Status = Arena_Fight;
-        arena.StartCountdown();
-        arena.ResetPlayers();
+        arena.StartDuel(1.5);
       }
     }
     case Arena_Fight:
     {
-      Debug("[AddToQueue] Arena is in FIGHT - adding %s (userid %d) to queue", 
-        player.Name, GetClientUserId(client));
+      // Debug("[AddToQueue] Arena is in FIGHT - adding %s (userid %d) to queue", 
+        // player.Name, GetClientUserId(client));
       arena.PlayerQueue.Push(GetClientUserId(client));
-      Debug("[AddToQueue] Queue now has %d players", arena.PlayerQueue.Length);
+      // Debug("[AddToQueue] Queue now has %d players", arena.PlayerQueue.Length);
     }
   }
   
   // Close client's menu
   player.CloseAddMenu();
-  Debug("[AddToQueue] Closed player's menu - process complete\n");
+  // Debug("[AddToQueue] Closed player's menu - process complete\n");
 }
 
 void RemoveFromQueue(int client, bool forceTeamChange = true)
@@ -1268,8 +1345,6 @@ Action Timer_ResetPlayer(Handle timer, DataPack pack)
   pack.ReadCellArray(player, sizeof(player));
   delete pack;
   
-  Debug("[Timer_ResetPlayer] Resetting player %s who died in arena %d", player.Name, player.ArenaId);
-  
   ResetPlayer(player);
   
   return Plugin_Handled;
@@ -1279,6 +1354,11 @@ void ResetPlayer(Player player)
 {
   int client = GetClientOfUserId(player.UserID);
   
+  if (!IsValidClient(client))
+  {
+    return;
+  }
+
   // Get current class before team change  
   TFClassType currentClass = TF2_GetPlayerClass(client);
   
@@ -1348,7 +1428,6 @@ Action Timer_TeleportPlayer(Handle timer, DataPack pack)
   // Get arena
   Arena arena;
   arena = player.GetArena();
-  Debug("[Timer_TeleportPlayer] Getting arena %s (id %d)", arena.Name, player.ArenaId);
   
   // Get best spawn point based on opponent position
   SpawnPoint coords;
@@ -1486,6 +1565,7 @@ Arena GetArena(int arenaId)
       return arena;
     }
   }
+  return arena;
 }
 
 void Debug(const char[] msg, any...)
