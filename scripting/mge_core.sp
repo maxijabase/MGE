@@ -127,6 +127,19 @@ enum struct Player
     
     return opponent;
   }
+
+  void DestroyBuildings()
+  {
+    int building = -1;
+    while ((building = FindEntityByClassname(building, "obj_*")) != -1)
+    {
+      if (GetEntPropEnt(building, Prop_Send, "m_hBuilder") == GetClientOfUserId(this.UserID))
+      {
+          SetVariantInt(9999);
+          AcceptEntityInput(building, "RemoveHealth");
+      }
+    }
+  }
 }
 
 enum struct Arena
@@ -175,8 +188,8 @@ enum struct Arena
       this.BluScore++;
     }
     
-    // Debug current score
-    Debug("Score: RED %d - %d BLUE", this.RedScore, this.BluScore);
+    // Debug current score with arena name
+    Debug("Score: RED %d - %d BLUE (%s)", this.RedScore, this.BluScore, this.Name);
 
     // Store updated arena
     g_Arenas.SetArray(this.Id - 1, this);
@@ -411,16 +424,18 @@ public void OnPluginStart()
 {
   //ServerCommand("sm plugins unload mge_core");
   LoadArenas();
-  RegConsoleCmd("jointeam", CMD_JoinTeam);
-  RegConsoleCmd("joinclass", CMD_JoinClass);
-  RegConsoleCmd("join_class", CMD_JoinClass);
-  RegConsoleCmd("sm_autoteam", CMD_AutoTeam);
   RegConsoleCmd("sm_add", CMD_Add, "Usage: add <arena number/arena name>. Add to an arena.");
   RegConsoleCmd("sm_remove", CMD_Remove, "Remove from current arena.");
   RegConsoleCmd("sm_debugplayers", CMD_DebugPlayers);
   RegConsoleCmd("sm_debugarenas", CMD_DebugArenas);
+  RegAdminCmd("sm_botme", CMD_AddBot, ADMFLAG_GENERIC, "Add bot to your arena");
+
+  RegConsoleCmd("autoteam", CMD_AutoTeam);
+  RegConsoleCmd("jointeam", CMD_JoinTeam);
+  RegConsoleCmd("joinclass", CMD_JoinClass);
+  RegConsoleCmd("join_class", CMD_JoinClass);
   RegConsoleCmd("kill", CMD_Kill);
-  RegAdminCmd("sm_botme", CMD_AddBot, ADMFLAG_BAN, "Add bot to your arena");
+  RegConsoleCmd("eureka_teleport", CMD_EurekaTeleport);
   
   g_Players = new ArrayList(sizeof(Player));
   
@@ -435,6 +450,11 @@ public void OnPluginStart()
       }
     }
   }
+}
+
+public Action CMD_EurekaTeleport(int client, int args)
+{
+  return Plugin_Handled;
 }
 
 public Action CMD_AddBot(int client, int args) {
@@ -1182,6 +1202,10 @@ public Action CMD_JoinClass(int client, int args)
     pack.WriteCellArray(player, sizeof(player));
     CreateTimer(0.1, Timer_ResetPlayer, pack);
   }
+
+  // Destroy all buildings
+  player.DestroyBuildings();
+
   return Plugin_Handled;
 }
 
