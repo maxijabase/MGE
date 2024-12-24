@@ -271,6 +271,11 @@ enum struct Player
     SetHudTextParams(0.01, 0.01, 120.0, 255, 255, 255, 255);
     ShowSyncHudText(this.ToClient(), hud_ArenaInfo, report);
   }
+
+  void HideHud()
+  {
+    ClearSyncHud(this.ToClient(), hud_ArenaInfo);
+  }
 }
 
 enum struct Arena
@@ -1112,11 +1117,15 @@ public Action Timer_ChangeSpecTarget(Handle timer, int userid)
   }
   
   int target = GetEntPropEnt(client, Prop_Send, "m_hObserverTarget");
+  Player player;
+  player = GetPlayer(userid);
   if (IsValidClient(target))
   { 
-    Player player;
-    player = GetPlayer(userid);
     player.ShowSpecHud(target);
+  }
+  else
+  {
+    player.HideHud();
   }
   
   return Plugin_Stop;
