@@ -556,11 +556,6 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
   RegPluginLibrary("mge");
 
-  // CreateNative("MGE.AddPlayer", Native_AddPlayer);
-  // CreateNative("MGE.RemovePlayer", Native_RemovePlayer);
-  // CreateNative("MGE.GetPlayers", Native_GetPlayers);
-  // CreateNative("MGE.GetArenas", Native_GetArenas);
-  
   return APLRes_Success;
 }
 
@@ -601,12 +596,10 @@ public void OnPluginStart()
 
 public Action CMD_Spec(int client, int args)
 {
-  if (!IsValidClient(client))
+  if (IsValidClient(client))
   {
-    return Plugin_Continue;
+    CreateTimer(0.1, Timer_ChangeSpecTarget, GetClientUserId(client));
   }
-
-  CreateTimer(0.1, Timer_ChangeSpecTarget, GetClientUserId(client));
   return Plugin_Continue;
 }
 
