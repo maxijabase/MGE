@@ -3,6 +3,7 @@
 #include <sourcemod>
 #include <tf2_stocks>
 #include <sdkhooks>
+#include <queue>
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -58,9 +59,9 @@ enum struct SpawnPoint
 
 enum struct Player
 {
-  char Name[MAX_NAME_LENGTH];
   int Index;
   int UserID;
+  int ArenaSpecTarget;
   int ELO;
   int ArenaId;
   float Handicap;
@@ -70,7 +71,6 @@ enum struct Player
   
   void Fill(int client)
   {
-    GetClientName(client, this.Name, sizeof(this.Name));
     this.UserID = GetClientUserId(client);
     this.BotRequested = false;
     this.BotClass = TFClass_Unknown;
@@ -86,7 +86,27 @@ enum struct Player
     }
     TF2_SetPlayerClass(client, class);
   }
-  
+
+  void SetTeam(TFTeam team)
+  {
+    int client = this.ToClient();
+    if (!IsValidClient(client))
+    {
+      return;
+    }
+    TF2_ChangeClientTeam(client, team);
+  }
+
+  TFTeam GetTeam()
+  {
+    int client = this.ToClient();
+    if (!IsValidClient(client))
+    {
+      return TFTeam_Unassigned;
+    }
+    return TF2_GetClientTeam(client);
+  }
+
   void Reset()
   {
     int client = this.ToClient();
@@ -225,7 +245,7 @@ enum struct Player
   void ShowPlayerHud()
   {
     int client = this.ToClient();
-    if (!IsValidClient(client))
+    if (!IsValidClient(client) || TF2_GetClientTeam(client) == TFTeam_Spectator)
     {
       return;
     }
@@ -243,30 +263,31 @@ enum struct Player
 
     if (opponent.UserID != 0)
     {
-      Format(report, sizeof(report), "%s\n%s : %i", report, opponent.Name, arena.GetScore(opponent.ToClient()));
+      Format(report, sizeof(report), "%s\n%N : %i", report, opponent.ToClient(), arena.GetScore(opponent.ToClient()));
     }
 
     ShowSyncHudText(client, hud_ArenaInfo, report);
   }
 
-  void ShowSpecHud(int target)
+  void ShowSpecHud(int arenaId)
   {
-    // From target, we must get his arena, and then show the hud to us as if we were him, and his opponent
-    Player targetPlayer;
-    targetPlayer = GetPlayer(GetClientUserId(target));
     Arena arena;
-    arena = targetPlayer.GetArena();
-
+    arena = GetArena(arenaId);
     char report[256];
-    Format(report, sizeof(report), "Arena %s\n%N : %i", arena.Name, target, arena.GetScore(target));
-
-    Player targetOpponent;
-    targetOpponent = targetPlayer.GetOpponent();
-
-    if (targetOpponent.UserID != 0)
+    Format(report, sizeof(report), "Arena %s", arena.Name);
+    for (int i = 0; i < arena.Players.Length; i++)
     {
-      int targetOpponentClient = targetOpponent.ToClient();
-      Format(report, sizeof(report), "%s\n%N : %i", report, targetOpponentClient, arena.GetScore(targetOpponentClient));
+      if (!arena.FourPlayers)
+      {
+        Player arenaPlayer;
+        arena.Players.GetArray(i, arenaPlayer);
+        int client = arenaPlayer.ToClient();
+        Format(report, sizeof(report), "%s\n%N : %i", report, client, arena.GetScore(client));
+      }
+      else
+      {
+        // 2v2 logic
+      }
     }
     SetHudTextParams(0.01, 0.01, 120.0, 255, 255, 255, 255);
     ShowSyncHudText(this.ToClient(), hud_ArenaInfo, report);
@@ -276,6 +297,22 @@ enum struct Player
   {
     ClearSyncHud(this.ToClient(), hud_ArenaInfo);
   }
+
+  void SetArenaSpecTarget()
+  {
+    int specTarget = GetEntPropEnt(this.ToClient(), Prop_Send, "m_hObserverTarget");
+    if (!IsValidClient(specTarget))
+    {
+      this.ArenaSpecTarget = 0;
+    }
+    else
+    {
+      Player target;
+      target = GetPlayer(GetClientUserId(specTarget));
+      this.ArenaSpecTarget = target.GetArena().Id;
+    }
+    g_Players.SetArray(this.Index, this);
+  }
 }
 
 enum struct Arena
@@ -283,7 +320,7 @@ enum struct Arena
   char Name[MAX_ARENA_NAME];
   int Id;
   ArrayList Players;
-  ArrayList PlayerQueue;
+  Queue PlayerQueue;
   ArrayList SpawnPoints;
   ArenaStatus Status;
   int FragLimit;
@@ -315,7 +352,8 @@ enum struct Arena
   int RedScore;
   int BluScore;
   
-  void AddScore(int client) {
+  void AddScore(int client)
+  {
     // Determine team and increment appropriate score
     TFTeam team = TF2_GetClientTeam(client);
     if (team == TFTeam_Red) {
@@ -343,12 +381,14 @@ enum struct Arena
     this.Status = status;
     g_Arenas.SetArray(this.Id - 1, this);
   }
-  
-  bool HasWinner() {
-    return (this.RedScore >= this.FragLimit || this.BluScore >= this.FragLimit);
+
+  bool HasWinner()
+  {
+    return (this.RedScore >= 5 || this.BluScore >= 5);
   }
   
-  TFTeam GetWinningTeam() {
+  TFTeam GetWinningTeam()
+  {
     if (this.RedScore >= this.FragLimit)return TFTeam_Red;
     if (this.BluScore >= this.FragLimit)return TFTeam_Blue;
     return TFTeam_Unassigned;
@@ -572,6 +612,7 @@ public void OnPluginStart()
   RegConsoleCmd("sm_debugplayers", CMD_DebugPlayers);
   RegConsoleCmd("sm_debugarenas", CMD_DebugArenas);
   RegAdminCmd("sm_botme", CMD_AddBot, ADMFLAG_GENERIC, "Add bot to your arena");
+  RegAdminCmd("sm_bots", CMD_AddBots, ADMFLAG_GENERIC, "Add bots");
 
   // TF2 commands we intercept and/or override 
   RegConsoleCmd("autoteam", CMD_AutoTeam);
@@ -597,6 +638,29 @@ public void OnPluginStart()
       }
     }
   }
+}
+
+public Action CMD_AddBots(int client, int args)
+{
+  FakeClientCommand(client, "sm_kick @!me");
+  FindConVar("sv_cheats").SetInt(1);
+  ServerCommand("bot -name b1 -team red");
+  ServerCommand("sm_ap b1 1");
+  ServerCommand("bot -name b2 -team blue");
+  ServerCommand("sm_ap b2 1");
+  ServerCommand("bot -name b3 -team red");
+  ServerCommand("sm_ap b3 2");
+  ServerCommand("bot -name b4 -team blue");
+  ServerCommand("sm_ap b4 2");
+  ServerCommand("bot -name b5 -team red");
+  ServerCommand("sm_ap b5 3");
+  ServerCommand("bot -name b6 -team blue");
+  ServerCommand("sm_ap b6 3");
+  ServerCommand("bot -name b7 -team red");
+  ServerCommand("sm_ap b7 4");
+  ServerCommand("bot -name b8 -team blue");
+  ServerCommand("sm_ap b8 4");
+  return Plugin_Handled;
 }
 
 public Action CMD_Spec(int client, int args)
@@ -684,7 +748,7 @@ public Action CMD_DebugPlayers(int client, int args)
     Player player;
     g_Players.GetArray(i, player);
     Debug("=====TICK %2.f====", GetTickedTime());
-    Debug("%d - Name: %s", i, player.Name);
+    Debug("%d - Name: %N", i, player.ToClient());
     Debug("%d - UserID: %d", i, player.UserID);
     Debug("%d - ArenaID: %d", i, player.ArenaId);
     Debug("==================");
@@ -721,7 +785,7 @@ public Action CMD_DebugArenas(int client, int args) {
         arena.Players.GetArray(j, player);
         
         bool isLast = (j == arena.Players.Length - 1);
-        Debug("│  %s─ %s (ID: %d)", isLast ? "└" : "├", player.Name, player.UserID);
+        Debug("│  %s─ %N (ID: %d)", isLast ? "└" : "├", player.ToClient(), player.UserID);
         Debug("│  %s  ├─ UserID: %d", isLast ? " " : "│", player.UserID);
         Debug("│  %s  └─ ArenaID: %d", isLast ? " " : "│", player.ArenaId);
       }
@@ -762,6 +826,7 @@ public void OnMapStart()
   FindConVar("mp_teams_unbalance_limit").SetInt(32);
   FindConVar("mp_tournament").SetInt(0);
   FindConVar("tf_player_movement_restart_freeze").SetInt(0);
+  FindConVar("mp_disable_respawn_times").SetInt(1);
 
   PrecacheSound(AN_THREE);
   PrecacheSound(AN_TWO); 
@@ -810,7 +875,7 @@ public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroad
     return Plugin_Continue;
   }
 
-  // Regen opponent and refresh hud
+  // Regen opponent
   int opponentClient = opponent.ToClient();
   if (IsValidClient(opponentClient)) {
     RequestFrame(RegenKiller, opponent.UserID);
@@ -840,6 +905,11 @@ public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroad
       }
     }
 
+    // if (!arena.PlayerQueue.Empty)
+    // {
+    //   arena.ProcessNextPlayer();
+    // }
+
     // Reset arena
     arena.StartDuel(3.0);
   } else {
@@ -849,6 +919,16 @@ public Action Event_OnPlayerDeath(Event event, const char[] name, bool dontBroad
   // Refresh hud to killer
   opponent.ShowPlayerHud();
 
+  // Refresh hud to all players spectating the fight
+  for (int i = 0; i < g_Players.Length; i++)
+  {
+    Player player;
+    g_Players.GetArray(i, player);
+    if (player.GetTeam() == TFTeam_Spectator && player.ArenaSpecTarget == arena.Id)
+    {
+      player.ShowSpecHud(victim.ToClient());
+    }
+  }
   return Plugin_Continue;
 }
 
@@ -877,6 +957,7 @@ public Action Event_OnPlayerHurt(Event event, const char[] name, bool dontBroadc
 
 public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBroadcast)
 {
+  event.BroadcastDisabled = true;
   int userid = event.GetInt("userid");
   int client = GetClientOfUserId(userid);
   if (!client)
@@ -890,6 +971,10 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
     // Set arena back to idle if it wasn't
     Player player;
     player = GetPlayer(userid);
+
+    // Hide hud
+    player.HideHud();
+    CreateTimer(1.0, Timer_ChangeSpecTarget, player.UserID);
     
     // If player is not in an arena, do nothing
     if (player.ArenaId == 0)
@@ -912,7 +997,7 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
           botPlayer = GetPlayer(GetClientUserId(i));
           if (botPlayer.ArenaId == player.ArenaId)
           {
-            KickClient(i, "Bot requester went to spectator");
+            KickClient(i);
             // Reset the bot request flag
             g_Players.Set(player.Index, false, Player::BotRequested);
             break;
@@ -928,7 +1013,6 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
     RemoveFromQueue(client, false);
   }
   
-  event.BroadcastDisabled = true;
   return Plugin_Changed;
 }
 
@@ -971,7 +1055,7 @@ void LoadArenas()
     arena.AllowedClasses = new ArrayList(ByteCountToCells(32));
     arena.SpawnPoints = new ArrayList(sizeof(SpawnPoint));
     arena.Players = new ArrayList(sizeof(Player));
-    arena.PlayerQueue = new ArrayList(sizeof(Player));
+    arena.PlayerQueue = new Queue(sizeof(Player));
     arena.Status = Arena_Idle;
     
     // Get section name to get arena name
@@ -1086,8 +1170,6 @@ public void OnClientPostAdminCheck(int client)
       g_Players.GetArray(i, requester);
       if (requester.BotRequested)
       {
-        Debug("Found requester: %s in arena %d", requester.Name, requester.ArenaId);
-        
         // Reset the BotRequested flag BEFORE adding the bot
         g_Players.Set(i, false, Player::BotRequested);
         
@@ -1116,12 +1198,14 @@ public Action Timer_ChangeSpecTarget(Handle timer, int userid)
     return Plugin_Stop;
   }
   
-  int target = GetEntPropEnt(client, Prop_Send, "m_hObserverTarget");
   Player player;
   player = GetPlayer(userid);
-  if (IsValidClient(target))
-  { 
-    player.ShowSpecHud(target);
+
+  player.SetArenaSpecTarget();
+
+  if (player.ArenaSpecTarget != 0)
+  {
+    player.ShowSpecHud(player.ArenaSpecTarget);
   }
   else
   {
@@ -1488,7 +1572,7 @@ void AddToQueue(int client, int arenaid)
     }
     case Arena_Fight:
     {
-      arena.PlayerQueue.Push(GetClientUserId(client));
+      arena.PlayerQueue.PushArray(player);
     }
   }
   
