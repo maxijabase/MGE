@@ -68,12 +68,14 @@ enum struct Player
   bool ShowHUD;
   bool BotRequested;
   TFClassType BotClass;
+  int BotUserID;
   
   void Fill(int client)
   {
     this.UserID = GetClientUserId(client);
     this.BotRequested = false;
     this.BotClass = TFClass_Unknown;
+    this.BotUserID = 0;
     this.Index = g_Players.Length;
   }
 
@@ -124,19 +126,10 @@ enum struct Player
     arena = this.GetArena();
     
     if (IsFakeClient(client)) {
-      // For bots, find the player who requested them
-      Player requester;
-      for (int i = 0; i < g_Players.Length; i++) {
-        g_Players.GetArray(i, requester);
-        if (requester.BotRequested) {
-          // Found the requester - set bot's class to requester's chosen bot class
-          TFClassType requestedClass = requester.BotClass;
-          if (requestedClass != TFClass_Unknown) {
-            this.SetClass(requestedClass);
-            currentClass = requestedClass; // Update currentClass to match
-          }
-          break;
-        }
+      // For bots, apply the class stored on the bot's own record
+      if (this.BotClass != TFClass_Unknown) {
+        this.SetClass(this.BotClass);
+        currentClass = this.BotClass;
       }
     } else {
       // Original class validation for human players
@@ -340,7 +333,7 @@ enum struct Arena
   bool AllowKOTH;
   float KOTHTimer;
   int KOTHTeamSpawn;
-  int MinimumDistance;
+  float MinimumDistance;
   float RespawnTime;
   bool FourPlayers;
   bool Ultiduo;
@@ -682,6 +675,12 @@ public Action CMD_AddBot(int client, int args) {
   Player player;
   player = GetPlayer(GetClientUserId(client));
   
+  // Check if server is not full
+  if (GetClientCount(true) >= MaxClients) {
+    PrintToChat(client, "Server is full!");
+    return Plugin_Handled;
+  }
+
   // Make sure player is in an arena
   if (player.ArenaId == 0) {
     PrintToChat(client, "You must be in an arena to add a bot!");
@@ -690,24 +689,23 @@ public Action CMD_AddBot(int client, int args) {
   
   // Check if player already has a bot requested
   if (player.BotRequested) {
-    PrintToChat(client, "You already have a bot request pending!");
+    PrintToChat(client, "You already requested a bot!");
     return Plugin_Handled;
   }
   
   // Default to Scout if no class specified
   TFClassType botClass = TFClass_Scout;
+  char className[32] = "scout";
   
-  // If class was specified, validate and use it
+  // If class was specified, validate using TF2_GetClass but pass arg1 directly when valid
   if (args > 0) {
     char arg1[32];
     GetCmdArg(1, arg1, sizeof(arg1));
-    
     TFClassType requestedClass = TF2_GetClass(arg1);
-    if (requestedClass == TFClass_Unknown) {
-      ReplyToCommand(client, "[SM] Invalid class specified. Usage: !botme [class]");
-      return Plugin_Handled;
+    if (requestedClass != TFClass_Unknown) {
+      botClass = requestedClass;
+      strcopy(className, sizeof(className), arg1);
     }
-    botClass = requestedClass;
   }
   
   // Store the chosen class for the bot
@@ -715,15 +713,15 @@ public Action CMD_AddBot(int client, int args) {
   
   // Mark player as requesting a bot
   g_Players.Set(player.Index, true, Player::BotRequested);
-  
-  // Prevent bot from being kicked
-  FindConVar("tf_bot_quota").SetInt(1);
-  FindConVar("tf_bot_quota_mode").SetString("normal");
-  FindConVar("tf_bot_join_after_player").SetInt(0);
-  FindConVar("tf_bot_auto_vacate").SetInt(0);
-  
-  // Add bot with debugging
-  ServerCommand("tf_bot_add");
+
+  // Get user team to set bot to opposite team
+  TFTeam myTeam = TF2_GetClientTeam(client);
+  char teamName[8];
+  Format(teamName, sizeof(teamName), "%s", (myTeam == TFTeam_Red) ? "blue" : "red");
+
+  char cmd[128];
+  Format(cmd, sizeof(cmd), "tf_bot_add 1 %s %s normal noquota", className, teamName);
+  ServerCommand(cmd);
   PrintToChat(client, "Requesting bot for arena %d...", player.ArenaId);
   
   return Plugin_Handled;
@@ -985,25 +983,23 @@ public Action Event_OnPlayerJoinTeam(Event event, const char[] name, bool dontBr
     Arena arena;
     arena = player.GetArena();
     
-    // If this player requested a bot, kick it
-    if (player.BotRequested)
+    // If this player was playing with a bot, kick it and clear references
+    int linkedBotUserId = player.BotUserID;
+    if (linkedBotUserId != 0)
     {
-      // Find and kick the bot in this arena
-      for (int i = 1; i <= MaxClients; i++)
+      int linkedBotClient = GetClientOfUserId(linkedBotUserId);
+      if (IsValidClient(linkedBotClient) && IsFakeClient(linkedBotClient))
       {
-        if (IsValidClient(i) && IsFakeClient(i))
-        {
-          Player botPlayer;
-          botPlayer = GetPlayer(GetClientUserId(i));
-          if (botPlayer.ArenaId == player.ArenaId)
-          {
-            KickClient(i);
-            // Reset the bot request flag
-            g_Players.Set(player.Index, false, Player::BotRequested);
-            break;
-          }
-        }
+        char botName[64];
+        GetClientName(linkedBotClient, botName, sizeof(botName));
+        for (int q = 0; botName[q] != '\0'; q++) { if (botName[q] == '"') botName[q] = '\''; }
+        char cmd[128];
+        Format(cmd, sizeof(cmd), "tf_bot_kick \"%s\"", botName);
+        ServerCommand(cmd);
       }
+      g_Players.Set(player.Index, 0, Player::BotUserID);
+      g_Players.Set(player.Index, false, Player::BotRequested);
+      g_Players.Set(player.Index, TFClass_Unknown, Player::BotClass);
     }
     
     if (arena.Status == Arena_Fight)
@@ -1106,17 +1102,17 @@ void LoadArenas()
     arena.HPRatio = kv.GetFloat("hpratio", 1.5);
     arena.AirshotHeight = kv.GetNum("airshotheight", 250);
     arena.BoostVectors = kv.GetNum("boostvectors", 0);
-    arena.VisibleHoop = kv.GetNum("vishoop", 0);
+    arena.VisibleHoop = (kv.GetNum("vishoop", 0) != 0);
     arena.EarlyLeave = kv.GetNum("earlyleave", 0);
-    arena.InfiniteAmmo = kv.GetNum("infammo", 1);
-    arena.ShowHP = kv.GetNum("showhp", 1);
+    arena.InfiniteAmmo = (kv.GetNum("infammo", 1) != 0);
+    arena.ShowHP = (kv.GetNum("showhp", 1) != 0);
     arena.MinimumDistance = kv.GetFloat("mindist", 100.0);
-    arena.FourPlayers = kv.GetNum("4player", 0);
-    arena.AllowChange = kv.GetNum("allowchange", 0);
-    arena.AllowKOTH = kv.GetNum("allowkoth", 0);
+    arena.FourPlayers = (kv.GetNum("4player", 0) != 0);
+    arena.AllowChange = (kv.GetNum("allowchange", 0) != 0);
+    arena.AllowKOTH = (kv.GetNum("allowkoth", 0) != 0);
     arena.KOTHTeamSpawn = kv.GetNum("kothteamspawn", 0);
     arena.RespawnTime = kv.GetFloat("respawntime", 0.1);
-    arena.KOTHTimer = kv.GetNum("timer", 180);
+    arena.KOTHTimer = kv.GetFloat("timer", 180.0);
     
     // Get gameplay type
     char gameplayString[16];
@@ -1170,11 +1166,23 @@ public void OnClientPostAdminCheck(int client)
       g_Players.GetArray(i, requester);
       if (requester.BotRequested)
       {
-        // Reset the BotRequested flag BEFORE adding the bot
-        g_Players.Set(i, false, Player::BotRequested);
-        
-        // Add bot immediately instead of using timer
-        Debug("Adding bot %N directly to arena %d", client, requester.ArenaId);
+        // Copy the requested class onto the bot's own record so Reset() applies it
+        g_Players.GetArray(bot.Index, bot);
+        bot.BotClass = requester.BotClass;
+        // Do NOT pre-set bot.ArenaId here; AddToQueue will set it. Pre-setting causes an early return.
+        g_Players.SetArray(bot.Index, bot);
+
+        // Link requester to this bot so we can clean it up if requester leaves
+        g_Players.Set(i, GetClientUserId(client), Player::BotUserID);
+
+        // Add bot through the normal queue/join logic so teleport/reset applies
+        // Assign the bot to the opposite team of the requester before queuing
+        TFTeam reqTeam = TF2_GetClientTeam(GetClientOfUserId(requester.UserID));
+        TFTeam botTeam = (reqTeam == TFTeam_Red) ? TFTeam_Blue : TFTeam_Red;
+        if (TF2_GetClientTeam(client) != botTeam) {
+          TF2_ChangeClientTeam(client, botTeam);
+        }
+        Debug("Adding bot %N directly to arena %d (class %d)", client, requester.ArenaId, requester.BotClass);
         AddToQueue(client, requester.ArenaId);
         break;
       }
@@ -1502,6 +1510,8 @@ void AddToQueue(int client, int arenaid)
     Arena playerArena;
     playerArena = player.GetArena();
     playerArena.RemovePlayer(player);
+    // Persist previous arena update
+    g_Arenas.SetArray(playerArena.Id - 1, playerArena);
   }
   
   // Get destination arena
@@ -1514,34 +1524,59 @@ void AddToQueue(int client, int arenaid)
     {
       // Find first available position
       bool positionFound = false;
-      for (int i = 0; i < 2; i++) {  // Only check first two positions for 1v1
-        bool positionTaken = false;
-        
-        // Check if this position is taken
-        for (int j = 0; j < arena.Players.Length; j++) {
-          Player existingPlayer;
-          arena.Players.GetArray(j, existingPlayer);
-          int existingClient = GetClientOfUserId(existingPlayer.UserID);
-          
-          if (IsValidClient(existingClient)) {
-            TFTeam existingTeam = TF2_GetClientTeam(existingClient);
-            if ((i == 0 && existingTeam == TFTeam_Red) || 
-              (i == 1 && existingTeam == TFTeam_Blue)) {
-              positionTaken = true;
-              break;
+
+      // If 1v1 and there is exactly one player, force join the opposite team
+      if (!arena.FourPlayers && arena.Players.Length == 1) {
+        Player existingPlayer;
+        arena.Players.GetArray(0, existingPlayer);
+        int existingClient = GetClientOfUserId(existingPlayer.UserID);
+        if (IsValidClient(existingClient)) {
+          TFTeam existingTeam = TF2_GetClientTeam(existingClient);
+          TFTeam desiredTeam = (existingTeam == TFTeam_Red) ? TFTeam_Blue : TFTeam_Red;
+          if (TF2_GetClientTeam(client) != desiredTeam) {
+            // Put the joining client on the opposite team
+            TF2_ChangeClientTeam(client, desiredTeam);
+            // If alive, move them to spec first to force team swap properly, then back
+            if (IsPlayerAlive(client)) {
+              TF2_ChangeClientTeam(client, TFTeam_Spectator);
+              TF2_ChangeClientTeam(client, desiredTeam);
             }
           }
-        }
-        
-        // Found free position
-        if (!positionTaken) {
-          if (i == 0) {
-            TF2_ChangeClientTeam(client, TFTeam_Red);
-          } else {
-            TF2_ChangeClientTeam(client, TFTeam_Blue);
-          }
           positionFound = true;
-          break;
+        }
+      }
+
+      // Otherwise, fallback to scanning for free RED/BLU slots
+      if (!positionFound) {
+        for (int i = 0; i < 2; i++) {  // Only check first two positions for 1v1
+          bool positionTaken = false;
+          
+          // Check if this position is taken
+          for (int j = 0; j < arena.Players.Length; j++) {
+            Player existingPlayer;
+            arena.Players.GetArray(j, existingPlayer);
+            int existingClient = GetClientOfUserId(existingPlayer.UserID);
+            
+            if (IsValidClient(existingClient)) {
+              TFTeam existingTeam = TF2_GetClientTeam(existingClient);
+              if ((i == 0 && existingTeam == TFTeam_Red) || 
+                (i == 1 && existingTeam == TFTeam_Blue)) {
+                positionTaken = true;
+                break;
+              }
+            }
+          }
+          
+          // Found free position
+          if (!positionTaken) {
+            if (i == 0) {
+              TF2_ChangeClientTeam(client, TFTeam_Red);
+            } else {
+              TF2_ChangeClientTeam(client, TFTeam_Blue);
+            }
+            positionFound = true;
+            break;
+          }
         }
       }
       
@@ -1554,25 +1589,28 @@ void AddToQueue(int client, int arenaid)
       g_Players.Set(player.Index, arenaid, Player::ArenaId);
       player.ArenaId = arenaid;
       
-      // Create pack for reset timer
+      // Push player to arena and persist
+      arena.AddPlayer(player);
+      g_Arenas.SetArray(arena.Id - 1, arena);
+      
+      // Reset player (respawn + teleport) after team is set
       DataPack pack = new DataPack();
       pack.WriteCellArray(player, sizeof(player));
-      
-      // Push player to arena
-      arena.AddPlayer(player);
-      
-      // Reset player
       CreateTimer(0.1, Timer_ResetPlayer, pack);
       
       // Start countdown if arena is full
       if (!arena.FourPlayers && arena.Players.Length == 2) {
-        arena.Status = Arena_Fight;
         arena.StartDuel(1.5);
+      }
+      else {
+        // Show HUD to player immediately when joining arena alone
+        player.ShowPlayerHud();
       }
     }
     case Arena_Fight:
     {
       arena.PlayerQueue.PushArray(player);
+      g_Arenas.SetArray(arena.Id - 1, arena);
     }
   }
   
@@ -1594,6 +1632,26 @@ void RemoveFromQueue(int client, bool forceTeamChange = true)
   player = GetPlayer(GetClientUserId(client));
   
   g_Players.Set(player.Index, 0, Player::ArenaId);
+
+  // If this player was playing with a bot, kick it and clear references
+  int linkedBotUserId = player.BotUserID;
+  if (linkedBotUserId != 0)
+  {
+    int linkedBotClient = GetClientOfUserId(linkedBotUserId);
+    if (IsValidClient(linkedBotClient) && IsFakeClient(linkedBotClient))
+    {
+      char botName[64];
+      GetClientName(linkedBotClient, botName, sizeof(botName));
+      // Strip quotes to keep command safe
+      for (int q = 0; botName[q] != '\0'; q++) { if (botName[q] == '"') botName[q] = '\''; }
+      char cmd[128];
+      Format(cmd, sizeof(cmd), "tf_bot_kick \"%s\"", botName);
+      ServerCommand(cmd);
+    }
+    g_Players.Set(player.Index, 0, Player::BotUserID);
+    g_Players.Set(player.Index, false, Player::BotRequested);
+    g_Players.Set(player.Index, TFClass_Unknown, Player::BotClass);
+  }
   
   Arena arena;
   arena = player.GetArena();
