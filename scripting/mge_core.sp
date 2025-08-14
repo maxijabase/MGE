@@ -606,6 +606,7 @@ public void OnPluginStart()
   RegConsoleCmd("sm_debugarenas", CMD_DebugArenas);
   RegAdminCmd("sm_botme", CMD_AddBot, ADMFLAG_GENERIC, "Add bot to your arena");
   RegAdminCmd("sm_bots", CMD_AddBots, ADMFLAG_GENERIC, "Add bots");
+  RegAdminCmd("sm_ap", CMD_AddPlayer, ADMFLAG_GENERIC, "Add player to arena");
 
   // TF2 commands we intercept and/or override 
   RegConsoleCmd("autoteam", CMD_AutoTeam);
@@ -631,6 +632,80 @@ public void OnPluginStart()
       }
     }
   }
+}
+
+public Action CMD_AddPlayer(int client, int args)
+{
+  if (args < 2)
+  {
+    PrintToChat(client, "Usage: sm_ap <player> <arena>");
+    return Plugin_Handled;
+  }
+
+  char targetArg[64];
+  char arenaArg[16];
+  GetCmdArg(1, targetArg, sizeof(targetArg));
+  GetCmdArg(2, arenaArg, sizeof(arenaArg));
+
+  int arenaId = StringToInt(arenaArg);
+  if (arenaId < 1 || arenaId > g_Arenas.Length)
+  {
+    PrintToChat(client, "Invalid arena id: %s", arenaArg);
+    return Plugin_Handled;
+  }
+
+  int target = 0;
+
+  // Try interpreting as userid first
+  int maybeUserId = StringToInt(targetArg);
+  if (maybeUserId > 0)
+  {
+    int byUserid = GetClientOfUserId(maybeUserId);
+    if (IsValidClient(byUserid))
+    {
+      target = byUserid;
+    }
+    else if (IsValidClient(maybeUserId))
+    {
+      // Fallback: treat as client index when not a valid userid
+      target = maybeUserId;
+    }
+  }
+
+  // Try FindTarget if still unresolved
+  if (!IsValidClient(target))
+  {
+    // Allow bots, ignore immunity
+    target = FindTarget(client, targetArg, false, false);
+  }
+
+  // Manual name match fallback
+  if (!IsValidClient(target))
+  {
+    for (int i = 1; i <= MaxClients; i++)
+    {
+      if (!IsValidClient(i))
+      {
+        continue;
+      }
+      char name[64];
+      GetClientName(i, name, sizeof(name));
+      if (StrEqual(name, targetArg, false) || StrContains(name, targetArg, false) != -1)
+      {
+        target = i;
+        break;
+      }
+    }
+  }
+
+  if (!IsValidClient(target))
+  {
+    PrintToChat(client, "Player '%s' not found", targetArg);
+    return Plugin_Handled;
+  }
+
+  AddToQueue(target, arenaId);
+  return Plugin_Handled;
 }
 
 public Action CMD_AddBots(int client, int args)
